@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Horarios de Cursos</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Horarios de Cursos Grupales</h1>
+  <div id="dias">
+    <button onclick="cargarDatos('lunes')">Lunes</button>
+    <button onclick="cargarDatos('martes')">Martes</button>
+    <button onclick="cargarDatos('miercoles')">Miércoles</button>
+    <button onclick="cargarDatos('jueves')">Jueves</button>
+    <button onclick="cargarDatos('viernes')">Viernes</button>
+    <button onclick="cargarDatos('sabado')">Sábado</button>
+  </div>
+  <table id="tabla-horarios">
+    <tbody>
+      <!-- Aquí se llenarán dinámicamente los datos -->
+    </tbody>
+  </table>
+  <script src="script.js"></script>
+</body>
+</html>
