@@ -101,7 +101,6 @@ const els = {
   search: $("#search"),
   fClase: $("#filter-clase"),
   fEdad: $("#filter-edad"),
-  fDia: $("#filter-dia"),
 
   info: $("#results-info"),
   btnNew: $("#btn-new-group"),
@@ -116,6 +115,10 @@ const els = {
   btnViewOccupancy: $("#btn-view-occupancy"),
   btnViewConflicts: $("#btn-view-conflicts"),
   btnViewProposals: $("#btn-view-proposals"),
+
+  // Toolbar utilities
+  btnClearFilters: $("#btn-clear-filters"),
+  btnReload: $("#btn-reload"),
 
   // ✅ Export/Import JSON
   btnExportJson: $("#btn-export-json"),
@@ -193,7 +196,17 @@ const els = {
 };
 
 function assertDOM(){
-  const must = ["results-info","day-tabs","schedule-grid","search","filter-clase","filter-edad","filter-dia"];
+  // ✅ Ya NO existe filter-dia. Día es por tabs.
+  const must = [
+    "results-info",
+    "day-tabs",
+    "schedule-grid",
+    "search",
+    "filter-clase",
+    "filter-edad",
+    "btn-clear-filters",
+    "btn-reload"
+  ];
   const missing = must.filter(id => !document.getElementById(id));
   if (missing.length){
     console.warn("[DOM] Faltan elementos:", missing);
@@ -214,6 +227,7 @@ const state = {
 
   activeDay: getTodayName(),
   unsubscribeGroups: null,
+  _subscribedOnce: false, // ✅ evita doble subscribe
 
   editingId: null,
   editingDraft: null,
@@ -356,6 +370,8 @@ function canonRoom(v){
 
 /* =========================
    URL STATE (filters)
+   - q/clase/edad son filtros reales
+   - dia es SOLO el tab activo (para compartir vista)
 ========================= */
 function readFiltersFromURL(){
   const p = new URLSearchParams(location.search);
@@ -363,8 +379,9 @@ function readFiltersFromURL(){
   const q = (p.get("q") ?? "").trim();
   const clase = (p.get("clase") ?? "").trim();
   const edad = (p.get("edad") ?? "").trim();
-  const dia = (p.get("dia") ?? "").trim();
 
+  // dia = tab activo
+  const dia = (p.get("dia") ?? "").trim();
   if (dia){
     const dCanon = canonDay(dia);
     if (DAYS.includes(dCanon)) state.activeDay = dCanon;
@@ -373,7 +390,6 @@ function readFiltersFromURL(){
   if (els.search && q) els.search.value = q;
   if (els.fClase && clase) els.fClase.value = clase;
   if (els.fEdad && edad) els.fEdad.value = edad;
-  if (els.fDia) els.fDia.value = canonDay(dia) || "";
 }
 
 function writeFiltersToURL(){
@@ -382,12 +398,14 @@ function writeFiltersToURL(){
   const q = (els.search?.value ?? "").trim();
   const clase = (els.fClase?.value ?? "").trim();
   const edad = (els.fEdad?.value ?? "").trim();
-  const dia = (els.fDia?.value ?? "").trim();
 
   if (q) p.set("q", q); else p.delete("q");
   if (clase) p.set("clase", clase); else p.delete("clase");
   if (edad) p.set("edad", edad); else p.delete("edad");
-  if (dia) p.set("dia", dia); else p.delete("dia");
+
+  // ✅ persistir tab de día (no es filtro)
+  if (state.activeDay && DAYS.includes(state.activeDay)) p.set("dia", state.activeDay);
+  else p.delete("dia");
 
   const qs = p.toString();
   const newUrl = qs ? `${location.pathname}?${qs}` : `${location.pathname}`;
@@ -457,11 +475,11 @@ function refreshAdminUI(){
   els.btnNew?.classList.toggle("hidden", !can);
   els.btnDelete?.classList.toggle("hidden", !can);
 
-  // ✅ Export/Import JSON solo para editores (si en HTML ya vienen hidden, igual esto los controla)
+  // ✅ Export/Import JSON solo para editores
   els.btnExportJson?.classList.toggle("hidden", !can);
   els.btnImportJson?.classList.toggle("hidden", !can);
 
-  // Conflictos/Propuestas solo para editores (en tu HTML ya vienen hidden)
+  // Conflictos/Propuestas solo para editores
   els.btnViewConflicts?.classList.toggle("hidden", !can);
   els.btnViewProposals?.classList.toggle("hidden", !can);
 
@@ -585,11 +603,40 @@ function wireEvents(){
   els.fClase?.addEventListener("change", onFilterChanged);
   els.fEdad?.addEventListener("change", onFilterChanged);
 
-  els.fDia?.addEventListener("change", () => {
-    const d = canonDay(els.fDia.value || "");
-    if (d && DAYS.includes(d)) api.syncDayUI(d, { fromSelect:true });
-    else onFilterChanged();
+  // ✅ Limpiar filtros
+  els.btnClearFilters?.addEventListener("click", () => {
+    if (els.search) els.search.value = "";
+    if (els.fClase) els.fClase.value = "";
+    if (els.fEdad) els.fEdad.value = "";
+    ctx.utils.writeFiltersToURL();
+    api.applyFiltersAndRender();
+    toast("Filtros limpios ✅");
   });
+
+  // ✅ Recargar datos (resuscribe / rehydrate)
+  els.btnReload?.addEventListener("click", async () => {
+    try{
+      toast("Recargando…");
+      if (typeof api.reload === "function"){
+        await api.reload();
+      } else if (typeof api.subscribeGroupsOnce === "function"){
+        // fallback: re-subscribe. El core debería manejar "unsubscribe old".
+        api.subscribeGroupsOnce({ force:true });
+      } else {
+        // último recurso: refrescar página
+        location.reload();
+      }
+    }catch(err){
+      console.error(err);
+      toast("No se pudo recargar. Mira consola.");
+    }
+  });
+
+  // Tabs día: cuando core cambie el día, que URL quede coherente
+  // (el core debería llamar writeFiltersToURL() cuando syncDayUI, pero aquí lo aseguramos)
+  // Esto NO depende de un select.
+  // Nota: api.syncDayUI(d) ya debería setear state.activeDay.
+  // Aquí solo te dejamos el atajo de teclado abajo.
 
   els.btnNew?.addEventListener("click", () => {
     if (!canEdit()) { explainNoPerm("crear"); return; }
@@ -647,9 +694,11 @@ function wireEvents(){
       if (e.key === "ArrowRight"){
         e.preventDefault();
         api.syncDayUI(nextDay(state.activeDay, +1));
+        ctx.utils.writeFiltersToURL();
       } else if (e.key === "ArrowLeft"){
         e.preventDefault();
         api.syncDayUI(nextDay(state.activeDay, -1));
+        ctx.utils.writeFiltersToURL();
       }
     }
   });
@@ -710,8 +759,6 @@ async function init(){
   ctx.utils.readFiltersFromURL();
   api.initUIModes();
 
-  if (els.fDia && DAYS.includes(state.activeDay)) els.fDia.value = state.activeDay;
-
   wireEvents();
   api.renderDayTabs();
 
@@ -737,18 +784,29 @@ async function init(){
     }
 
     refreshAdminUI();
-    api.subscribeGroupsOnce();
+
+    // ✅ Subscribe una sola vez (evita “doble onSnapshot” que se siente como lag + duplicados)
+    if (!state._subscribedOnce){
+      state._subscribedOnce = true;
+      api.subscribeGroupsOnce();
+    } else {
+      // si hay cambios de sesión, deja que core decida si necesita rehidratar permisos
+      if (typeof api.onAuthChanged === "function") api.onAuthChanged();
+    }
   });
 
-  // fallback
+  // fallback: si por algún motivo no suscribió, lo intenta
   setTimeout(() => {
-    if (!state.unsubscribeGroups) api.subscribeGroupsOnce();
-  }, 900);
+    if (!state.unsubscribeGroups && !state._subscribedOnce){
+      state._subscribedOnce = true;
+      api.subscribeGroupsOnce();
+    }
+  }, 1200);
 
   // view initial
   setTimeout(() => api.setView(state.activeView), 0);
 
-  // URL coherente desde arranque
+  // URL coherente desde arranque (incluye dia=tab)
   ctx.utils.writeFiltersToURL();
 }
 
