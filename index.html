@@ -1,26 +1,807 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Horarios de Cursos</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light" />
+  <meta name="theme-color" content="#ffffff" />
+
+  <title>Horarios Grupales 2026 · Musicala</title>
+  <meta name="description" content="Consulta los horarios grupales de Musicala por clase, edad, día, hora y salón." />
+
+  <!-- SEO / Social -->
+  <meta name="robots" content="index,follow" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Horarios Grupales 2026 · Musicala" />
+  <meta property="og:description" content="Consulta los horarios grupales por clase, edad, día, hora y salón." />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="./logo.png" />
+  <meta property="og:locale" content="es_CO" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Horarios Grupales 2026 · Musicala" />
+  <meta name="twitter:description" content="Consulta los horarios grupales por clase, edad, día, hora y salón." />
+  <meta name="twitter:image" content="./logo.png" />
+
+  <!-- Icon -->
+  <link rel="icon" href="./logo.png" />
+
+  <!-- CSS -->
+  <link rel="preload" href="./styles.css" as="style" />
+  <link rel="stylesheet" href="./styles.css" />
+
+  <style>
+    /* Evita salto por scrollbar */
+    .schedule-scroll{ scrollbar-gutter: stable both-edges; overscroll-behavior: contain; }
+    /* Evita que el tablero colapse mientras carga */
+    .schedule-wrap{ min-height: 520px; }
+
+    /* Skip link accesible */
+    .skip-link{
+      position:absolute; left:-9999px; top:auto; width:1px; height:1px; overflow:hidden;
+    }
+    .skip-link:focus{
+      left:12px; top:12px; width:auto; height:auto; padding:10px 12px;
+      background:#fff; border:1px solid rgba(17,24,39,.18); border-radius:12px;
+      z-index:9999;
+      box-shadow: 0 12px 30px rgba(17,24,39,.12);
+    }
+
+    /* Noscript */
+    .noscript{
+      margin: 12px auto 0;
+      max-width: 1100px;
+      padding: 12px 14px;
+      background: #fff7ed;
+      border: 1px solid rgba(17,24,39,.14);
+      border-radius: 14px;
+      color: #7c2d12;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+
+    /* Loader mini */
+    .boot-skeleton{
+      display:flex; gap:10px; align-items:center;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px dashed rgba(17,24,39,.18);
+      background: rgba(255,255,255,.7);
+    }
+    .dot{
+      width:10px;height:10px;border-radius:999px;
+      background: rgba(17,24,39,.25);
+      animation: pulse 1s infinite ease-in-out;
+    }
+    .dot:nth-child(2){ animation-delay:.15s; }
+    .dot:nth-child(3){ animation-delay:.30s; }
+    @keyframes pulse{
+      0%,100%{ transform: translateY(0); opacity:.35; }
+      50%{ transform: translateY(-3px); opacity:.9; }
+    }
+    @media (prefers-reduced-motion: reduce){
+      .dot{ animation:none; }
+    }
+
+    /* Utilidad mínima para hidden */
+    .sr-only{
+      position:absolute!important;
+      width:1px;height:1px;
+      padding:0;margin:-1px;
+      overflow:hidden;clip:rect(0,0,0,0);
+      white-space:nowrap;border:0;
+    }
+
+    /* ===== Contenedor de vistas (para evitar overlays tapando clicks) ===== */
+    .views{
+      display:block;
+    }
+    .view{
+      display:block;
+    }
+    .hidden{ display:none !important; }
+
+    /* Stats panel (estructura; el look fino va en styles.css) */
+    .stats-wrap{ margin-top: 12px; }
+    .stats-card{
+      background: rgba(255,255,255,.92);
+      border: 1px solid rgba(17,24,39,.10);
+      border-radius: 18px;
+      padding: 12px;
+      box-shadow: 0 10px 30px rgba(17,24,39,.06);
+    }
+    .stats-head{
+      display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+      margin-bottom: 10px;
+    }
+    .stats-title{
+      display:flex; flex-direction:column; gap:2px;
+    }
+    .stats-title strong{ font-size: 13.5px; }
+    .stats-title span{ font-size: 12px; color: rgba(107,114,128,.95); font-weight: 750; }
+
+    .stats-grid{
+      display:grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 980px){
+      .stats-grid{ grid-template-columns: 1fr; }
+    }
+    .stats-box{
+      border: 1px solid rgba(17,24,39,.08);
+      background: rgba(255,255,255,.86);
+      border-radius: 16px;
+      padding: 10px;
+      min-height: 72px;
+    }
+    .stats-box h4{
+      margin:0 0 6px;
+      font-size: 12px;
+      letter-spacing:.02em;
+      color: rgba(107,114,128,.95);
+    }
+    .stats-list{
+      display:flex; flex-wrap:wrap; gap:8px;
+      margin:0; padding:0; list-style:none;
+    }
+    .stat-pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(17,24,39,.10);
+      background: rgba(255,255,255,.88);
+      font-size: 12px;
+      font-weight: 900;
+      color: rgba(17,24,39,.92);
+      white-space: nowrap;
+    }
+    .dot-mini{
+      width:10px;height:10px;border-radius:999px;
+      background: rgba(12,65,196,.35);
+      box-shadow: 0 0 0 3px rgba(12,65,196,.10);
+      flex: 0 0 auto;
+    }
+
+    .stats-alerts{
+      margin-top: 10px;
+      display:flex; flex-direction:column; gap:8px;
+    }
+    .alert-row{
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(245,158,11,.25);
+      background: rgba(245,158,11,.08);
+      color: rgba(124,45,18,.95);
+      font-size: 12.5px;
+      font-weight: 850;
+    }
+
+    /* Color controls (estructura) */
+    .color-controls{
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    }
+    .seg{
+      display:inline-flex; align-items:center; gap:6px;
+      padding: 6px 8px;
+      border: 1px solid rgba(17,24,39,.10);
+      background: rgba(255,255,255,.85);
+      border-radius: 999px;
+    }
+    .seg label{
+      display:inline-flex; align-items:center; gap:6px;
+      font-size: 12px; font-weight: 950; color: rgba(17,24,39,.88);
+      cursor:pointer;
+      padding: 4px 8px;
+      border-radius: 999px;
+    }
+    .seg input{ accent-color: #0C41C4; }
+
+    /* ===== Analytics panes (estructura mínima) ===== */
+    .analytics-wrap{ margin-top: 12px; }
+    .analytics-card{
+      background: rgba(255,255,255,.92);
+      border: 1px solid rgba(17,24,39,.10);
+      border-radius: 18px;
+      padding: 12px;
+      box-shadow: 0 10px 30px rgba(17,24,39,.06);
+    }
+    .analytics-head{
+      display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap;
+      margin-bottom: 10px;
+    }
+    .analytics-title{ display:flex; flex-direction:column; gap:3px; }
+    .analytics-title strong{ font-size: 13.5px; }
+    .analytics-title span{ font-size: 12px; color: rgba(107,114,128,.95); font-weight: 750; }
+    .analytics-tabs{
+      display:flex; gap:8px; flex-wrap:wrap;
+    }
+
+    .mini-grid{
+      display:grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 10px;
+    }
+    @media (max-width: 980px){
+      .mini-grid{ grid-template-columns: repeat(6, 1fr); }
+    }
+    @media (max-width: 560px){
+      .mini-grid{ grid-template-columns: repeat(2, 1fr); }
+    }
+    .mini-card{
+      grid-column: span 3;
+      border: 1px solid rgba(17,24,39,.08);
+      background: rgba(255,255,255,.86);
+      border-radius: 16px;
+      padding: 10px;
+      min-height: 74px;
+    }
+    .mini-card h4{
+      margin:0 0 6px;
+      font-size: 12px;
+      color: rgba(107,114,128,.95);
+      letter-spacing:.02em;
+    }
+    .mini-value{
+      font-size: 18px;
+      font-weight: 980;
+      color: rgba(17,24,39,.92);
+      line-height: 1.1;
+    }
+    .mini-sub{
+      margin-top: 6px;
+      font-size: 12px;
+      font-weight: 750;
+      color: rgba(107,114,128,.98);
+    }
+
+    .analytics-body{ display:flex; flex-direction:column; gap: 10px; }
+
+    .render-box{
+      border: 1px dashed rgba(17,24,39,.16);
+      background: rgba(255,255,255,.75);
+      border-radius: 16px;
+      padding: 10px;
+      min-height: 80px;
+    }
+    .render-box h4{
+      margin:0 0 8px;
+      font-size: 12px;
+      color: rgba(107,114,128,.95);
+      letter-spacing:.02em;
+    }
+  </style>
 </head>
+
 <body>
-  <h1>Horarios de Cursos Grupales</h1>
-  <div id="dias">
-    <button onclick="cargarDatos('lunes')">Lunes</button>
-    <button onclick="cargarDatos('martes')">Martes</button>
-    <button onclick="cargarDatos('miercoles')">Miércoles</button>
-    <button onclick="cargarDatos('jueves')">Jueves</button>
-    <button onclick="cargarDatos('viernes')">Viernes</button>
-    <button onclick="cargarDatos('sabado')">Sábado</button>
+  <a class="skip-link" href="#main">Saltar al contenido</a>
+
+  <noscript>
+    <div class="noscript">
+      <strong>Necesitas JavaScript</strong> para ver y filtrar el horario. Actívalo en tu navegador e intenta de nuevo.
+    </div>
+  </noscript>
+
+  <!-- ================= HEADER ================= -->
+  <header class="topbar" role="banner">
+    <div class="brand" id="brand-trigger" title="Musicala">
+      <img
+        src="./logo.png"
+        alt="Musicala"
+        class="logo"
+        id="logo-trigger"
+        decoding="async"
+        fetchpriority="high"
+      />
+      <div class="brand-text">
+        <h1 id="title-trigger">Horarios Grupales</h1>
+        <p>Vista por día · hora · salón (para asistentes)</p>
+      </div>
+    </div>
+
+    <div class="actions" aria-label="Acciones">
+      <button id="btn-login" class="btn ghost hidden" type="button">Iniciar sesión</button>
+      <button id="btn-logout" class="btn ghost hidden" type="button">Salir</button>
+    </div>
+  </header>
+
+  <!-- ================= MAIN ================= -->
+  <main class="container" id="main" role="main">
+
+    <!-- ===== FILTROS ===== -->
+    <section class="filters" aria-label="Filtros de búsqueda">
+      <div class="field grow">
+        <label for="search">Buscar</label>
+        <input
+          id="search"
+          type="search"
+          placeholder="Ej: Latino, Piano, Teatro, Musiteens…"
+          autocomplete="off"
+          inputmode="search"
+          aria-describedby="results-info"
+        />
+        <div class="sr-only" id="search-help">Escribe para filtrar grupos por texto.</div>
+      </div>
+
+      <div class="field">
+        <label for="filter-clase">Clase</label>
+        <select id="filter-clase">
+          <option value="">Todas</option>
+          <option value="Danza">Danza</option>
+          <option value="Teatro">Teatro</option>
+          <option value="Música">Música</option>
+          <option value="Artes plásticas">Artes plásticas</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="filter-edad">Edad</label>
+        <select id="filter-edad">
+          <option value="">Todas</option>
+          <option>Musibabies</option>
+          <option>Musicalitos</option>
+          <option>Musikids</option>
+          <option>Musiteens</option>
+          <option>Musigrandes</option>
+          <option>Musiadultos</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="filter-dia">Día (filtro)</label>
+        <select id="filter-dia">
+          <option value="">Todos</option>
+          <option>Lunes</option>
+          <option>Martes</option>
+          <option>Miércoles</option>
+          <option>Jueves</option>
+          <option>Viernes</option>
+          <option>Sábado</option>
+          <option>Domingo</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- ===== INFO / ESTADO + ACCIONES ===== -->
+    <section class="toolbar" aria-label="Barra de estado">
+      <div id="results-info" class="results-info" aria-live="polite">
+        <span class="boot-skeleton" aria-hidden="true">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span style="margin-left:6px;">Cargando horarios…</span>
+        </span>
+      </div>
+
+      <div class="toolbar-actions" aria-label="Acciones del tablero">
+
+        <!-- Vistas base -->
+        <button id="btn-view-grid" class="btn small" type="button" aria-pressed="true" data-view="grid" title="Vista en tablero">
+          Tablero
+        </button>
+        <button id="btn-view-list" class="btn small ghost" type="button" aria-pressed="false" data-view="list" title="Vista en lista">
+          Lista
+        </button>
+
+        <!-- Vistas analytics -->
+        <button id="btn-view-dashboard" class="btn small ghost" type="button" aria-pressed="false" data-view="dashboard" title="Resumen con KPIs y horas pico">
+          Dashboard
+        </button>
+        <button id="btn-view-occupancy" class="btn small ghost" type="button" aria-pressed="false" data-view="occupancy" title="Ocupación por edades, salones, áreas y franjas">
+          Ocupación
+        </button>
+        <button id="btn-view-conflicts" class="btn small ghost hidden" type="button" aria-pressed="false" data-view="conflicts" title="Choques, sobreventa y alertas del horario">
+          Conflictos
+        </button>
+        <button id="btn-view-proposals" class="btn small ghost hidden" type="button" aria-pressed="false" data-view="proposals" title="Sugerencias de huecos para programar">
+          Propuestas
+        </button>
+
+        <!-- Utilidades -->
+        <button id="btn-clear-filters" class="btn small ghost" type="button" title="Limpiar filtros">
+          Limpiar
+        </button>
+        <button id="btn-reload" class="btn small ghost" type="button" title="Recargar datos">
+          Recargar
+        </button>
+
+        <!-- Copiar link -->
+        <button id="btn-copy-link" class="btn small ghost" type="button" title="Copiar link con los filtros actuales">
+          Copiar link
+        </button>
+
+        <!-- Nuevo -->
+        <button id="btn-new-group" class="btn primary hidden" type="button">
+          + Nuevo grupo
+        </button>
+      </div>
+    </section>
+
+    <!-- ===== STATS / EQUILIBRIO (rápido) ===== -->
+    <section class="stats-wrap" aria-label="Estadísticas del horario" id="quick-stats-wrap">
+      <div class="stats-card">
+        <div class="stats-head">
+          <div class="stats-title">
+            <strong>Estadísticas rápidas</strong>
+            <span id="stats-subtitle">Equilibrio por áreas, edades y alertas del horario.</span>
+          </div>
+
+          <div class="color-controls" aria-label="Controles de color del tablero">
+            <div class="seg" role="group" aria-label="Colorear por">
+              <label title="Colores por área">
+                <input type="radio" name="colorMode" id="color-by-area" value="area" checked />
+                Área
+              </label>
+              <label title="Colores por edad">
+                <input type="radio" name="colorMode" id="color-by-age" value="age" />
+                Edad
+              </label>
+            </div>
+
+            <button id="btn-toggle-helpers" class="btn small ghost" type="button" aria-pressed="true" title="Mostrar/ocultar ayudas visuales">
+              Ayudas
+            </button>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stats-box" aria-label="Totales">
+            <h4>Totales</h4>
+            <ul class="stats-list" id="stats-totals">
+              <li class="stat-pill"><span class="dot-mini"></span>Grupos: <span id="stat-total-groups">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Sesiones: <span id="stat-total-sessions">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Salones usados: <span id="stat-total-rooms">—</span></li>
+            </ul>
+          </div>
+
+          <div class="stats-box" aria-label="Por áreas">
+            <h4>Por áreas</h4>
+            <ul class="stats-list" id="stats-by-area">
+              <li class="stat-pill"><span class="dot-mini"></span>Música: <span data-k="music">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Danza: <span data-k="dance">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Teatro: <span data-k="theater">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Artes: <span data-k="arts">—</span></li>
+            </ul>
+          </div>
+
+          <div class="stats-box" aria-label="Por edades">
+            <h4>Por edades</h4>
+            <ul class="stats-list" id="stats-by-age">
+              <li class="stat-pill"><span class="dot-mini"></span>Musibabies: <span data-k="Musibabies">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Musicalitos: <span data-k="Musicalitos">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Musikids: <span data-k="Musikids">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Musiteens: <span data-k="Musiteens">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Musigrandes: <span data-k="Musigrandes">—</span></li>
+              <li class="stat-pill"><span class="dot-mini"></span>Musiadultos: <span data-k="Musiadultos">—</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="stats-alerts" id="stats-alerts" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- ===== SELECTOR DE DÍA + LEYENDAS (solo para grid/list) ===== -->
+    <section class="daybar" aria-label="Selector de día y leyendas" id="daybar-wrap">
+      <div id="day-tabs" class="day-tabs" role="tablist" aria-label="Días"></div>
+
+      <div class="legend" aria-label="Leyenda de áreas">
+        <span class="legend-item music">Música</span>
+        <span class="legend-item dance">Danza</span>
+        <span class="legend-item theater">Teatro</span>
+        <span class="legend-item arts">Artes</span>
+        <span class="legend-item peak">Hora pico</span>
+      </div>
+    </section>
+
+    <section class="daybar" aria-label="Leyenda de edades" id="age-legend-wrap">
+      <div class="legend" aria-label="Leyenda por edades">
+        <span class="legend-item" data-age="Musibabies">Musibabies</span>
+        <span class="legend-item" data-age="Musicalitos">Musicalitos</span>
+        <span class="legend-item" data-age="Musikids">Musikids</span>
+        <span class="legend-item" data-age="Musiteens">Musiteens</span>
+        <span class="legend-item" data-age="Musigrandes">Musigrandes</span>
+        <span class="legend-item" data-age="Musiadultos">Musiadultos</span>
+      </div>
+    </section>
+
+    <!-- ===== VIEWS ROOT ===== -->
+    <div class="views" id="views-root" data-active-view="grid">
+
+      <!-- ===== GRID HORARIO ===== -->
+      <section class="view" id="view-grid" aria-label="Tablero de horarios">
+        <section class="schedule-wrap" id="grid-wrap">
+          <div class="schedule-scroll" role="region" aria-label="Tablero con desplazamiento">
+            <div id="schedule-grid" class="schedule-grid"></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ===== LISTA ===== -->
+      <section class="view hidden" id="view-list" aria-label="Lista de horarios">
+        <section id="schedule-list-wrap" class="schedule-wrap">
+          <div class="schedule-scroll" role="region" aria-label="Lista con desplazamiento">
+            <div id="schedule-list" class="schedule-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ===== DASHBOARD ===== -->
+      <section class="view hidden" id="view-dashboard" aria-label="Dashboard">
+        <section class="analytics-wrap" id="analytics-wrap">
+          <div class="analytics-card">
+            <div class="analytics-head">
+              <div class="analytics-title">
+                <strong id="analytics-title">Dashboard</strong>
+                <span id="analytics-subtitle">KPIs claros para operar, vender y no improvisar horarios.</span>
+              </div>
+
+              <div class="analytics-tabs" role="tablist" aria-label="Secciones de análisis">
+                <button id="tab-ana-dashboard" class="btn small" type="button" role="tab" aria-selected="true">
+                  Resumen
+                </button>
+                <button id="tab-ana-edad" class="btn small ghost" type="button" role="tab" aria-selected="false">
+                  Edades
+                </button>
+                <button id="tab-ana-salon" class="btn small ghost" type="button" role="tab" aria-selected="false">
+                  Salones
+                </button>
+                <button id="tab-ana-area" class="btn small ghost" type="button" role="tab" aria-selected="false">
+                  Áreas
+                </button>
+                <button id="tab-ana-franja" class="btn small ghost" type="button" role="tab" aria-selected="false">
+                  Franjas
+                </button>
+              </div>
+            </div>
+
+            <div class="mini-grid" aria-label="KPIs principales">
+              <div class="mini-card" aria-label="KPI: Grupos">
+                <h4>Grupos</h4>
+                <div class="mini-value" id="kpi-groups">—</div>
+                <div class="mini-sub" id="kpi-groups-sub">Activos según filtros</div>
+              </div>
+              <div class="mini-card" aria-label="KPI: Sesiones">
+                <h4>Sesiones</h4>
+                <div class="mini-value" id="kpi-sessions">—</div>
+                <div class="mini-sub" id="kpi-sessions-sub">Total sesiones activas</div>
+              </div>
+              <div class="mini-card" aria-label="KPI: Ocupación">
+                <h4>Ocupación</h4>
+                <div class="mini-value" id="kpi-occupancy">—</div>
+                <div class="mini-sub" id="kpi-occupancy-sub">Cupos ocupados / máximos</div>
+              </div>
+              <div class="mini-card" aria-label="KPI: Choques">
+                <h4>Choques</h4>
+                <div class="mini-value" id="kpi-collisions">—</div>
+                <div class="mini-sub" id="kpi-collisions-sub">Celdas con 2+ sesiones</div>
+              </div>
+            </div>
+
+            <div class="analytics-body">
+              <div class="render-box" id="ana-render-top">
+                <h4 id="ana-render-top-title">Resumen visual</h4>
+                <div id="ana-top-content">
+                  <div class="boot-skeleton" aria-hidden="true">
+                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                    <span style="margin-left:6px;">Dashboard listo… falta que main.js lo pinte 😌</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="render-box" id="ana-render-bottom">
+                <h4 id="ana-render-bottom-title">Detalles</h4>
+                <div id="ana-bottom-content"></div>
+              </div>
+
+              <div class="render-box" id="ana-render-alerts" aria-live="polite">
+                <h4>Insights</h4>
+                <div id="ana-alerts-content"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ===== OCCUPANCY (placeholder por ahora) ===== -->
+      <section class="view hidden" id="view-occupancy" aria-label="Ocupación">
+        <section class="analytics-wrap">
+          <div class="analytics-card">
+            <div class="analytics-head">
+              <div class="analytics-title">
+                <strong>Ocupación</strong>
+                <span>Distribución por edades, salones, áreas y franjas.</span>
+              </div>
+            </div>
+
+            <div class="analytics-body">
+              <div class="render-box">
+                <h4>Ocupación visual</h4>
+                <div id="occ-top-content" class="boot-skeleton" aria-hidden="true">
+                  <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                  <span style="margin-left:6px;">Lista para render…</span>
+                </div>
+              </div>
+              <div class="render-box">
+                <h4>Detalles</h4>
+                <div id="occ-bottom-content"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+    </div>
+
+    <!-- ===== FOOTER MINI ===== -->
+    <footer class="mini-footer" aria-label="Pie">
+      <small>
+        Consejo: usa <strong>Buscar</strong> + filtros para responder rápido al cliente. Si te equivocas, el horario se venga.
+      </small>
+    </footer>
+
+  </main>
+
+  <!-- ================= MODAL (admins) ================= -->
+  <div id="modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <header class="modal-header">
+        <h2 id="modal-title">Editar grupo</h2>
+        <button id="modal-close" class="icon-btn" type="button" aria-label="Cerrar">✕</button>
+      </header>
+
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="field">
+            <label for="m-clase">Clase</label>
+            <select id="m-clase">
+              <option>Danza</option>
+              <option>Teatro</option>
+              <option>Música</option>
+              <option>Artes plásticas</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="m-edad">Edad</label>
+            <select id="m-edad">
+              <option>Musibabies</option>
+              <option>Musicalitos</option>
+              <option>Musikids</option>
+              <option>Musiteens</option>
+              <option>Musigrandes</option>
+              <option>Musiadultos</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="m-enfoque">Enfoque / Instrumento / Técnica</label>
+            <input id="m-enfoque" placeholder="Ej: Latino, Piano, Urbano…" />
+          </div>
+
+          <div class="field">
+            <label for="m-nivel">Nivel</label>
+            <input id="m-nivel" placeholder="Exploración, Básico…" />
+          </div>
+
+          <div class="field">
+            <label for="m-cupo-max">Cupo máximo</label>
+            <input id="m-cupo-max" type="number" min="0" />
+          </div>
+
+          <div class="field">
+            <label for="m-cupo-ocupado">Cupos ocupados</label>
+            <input id="m-cupo-ocupado" type="number" min="0" />
+          </div>
+        </div>
+
+        <hr />
+
+        <section class="sessions">
+          <header class="sessions-header">
+            <h3>Horarios (día · hora · salón)</h3>
+            <button id="btn-add-session" class="btn small" type="button">
+              + Agregar horario
+            </button>
+          </header>
+
+          <div id="sessions-list" class="sessions-list"></div>
+        </section>
+      </div>
+
+      <footer class="modal-footer">
+        <label class="checkbox">
+          <input type="checkbox" id="m-activo" />
+          <span>Grupo activo</span>
+        </label>
+
+        <div class="modal-actions">
+          <button id="btn-delete" class="btn danger hidden" type="button">Eliminar</button>
+          <button id="btn-save" class="btn primary" type="button">Guardar</button>
+        </div>
+      </footer>
+    </div>
   </div>
-  <table id="tabla-horarios">
-    <tbody>
-      <!-- Aquí se llenarán dinámicamente los datos -->
-    </tbody>
-  </table>
-  <script src="script.js"></script>
+
+  <div id="toast" class="toast" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Secret Admin Trigger + utilidades UX -->
+  <script>
+    (function(){
+      const KEY = "musicala_admin";
+      const logo = document.getElementById("logo-trigger");
+      const toast = document.getElementById("toast");
+      if (!logo) return;
+
+      let clicks = 0;
+      let timer = null;
+      let pressTimer = null;
+
+      function showToast(msg){
+        if (!toast) return;
+        toast.textContent = msg;
+        toast.classList.add("show");
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => toast.classList.remove("show"), 1600);
+      }
+
+      // 5 clicks -> admin ON
+      logo.addEventListener("click", () => {
+        clicks++;
+        clearTimeout(timer);
+        timer = setTimeout(() => { clicks = 0; }, 900);
+
+        if (clicks >= 5){
+          localStorage.setItem(KEY, "1");
+          clicks = 0;
+          showToast("Modo admin activado ✅");
+          setTimeout(() => location.reload(), 250);
+        }
+      });
+
+      // press 1.2s -> admin OFF
+      const disable = () => {
+        localStorage.removeItem(KEY);
+        showToast("Modo admin desactivado 👌");
+        setTimeout(() => location.reload(), 250);
+      };
+
+      logo.addEventListener("mousedown", () => { pressTimer = setTimeout(disable, 1200); });
+      window.addEventListener("mouseup", () => clearTimeout(pressTimer));
+
+      logo.addEventListener("touchstart", () => { pressTimer = setTimeout(disable, 1200); }, { passive:true });
+      window.addEventListener("touchend", () => clearTimeout(pressTimer), { passive:true });
+      window.addEventListener("touchcancel", () => clearTimeout(pressTimer), { passive:true });
+
+      // Copiar link con filtros (sin depender de main.js)
+      const btnCopy = document.getElementById("btn-copy-link");
+      if (btnCopy){
+        btnCopy.addEventListener("click", async () => {
+          try{
+            const params = new URLSearchParams(location.search);
+            const q = (document.getElementById("search")?.value || "").trim();
+            const clase = document.getElementById("filter-clase")?.value || "";
+            const edad  = document.getElementById("filter-edad")?.value || "";
+            const dia   = document.getElementById("filter-dia")?.value || "";
+
+            if (q) params.set("q", q); else params.delete("q");
+            if (clase) params.set("clase", clase); else params.delete("clase");
+            if (edad) params.set("edad", edad); else params.delete("edad");
+            if (dia) params.set("dia", dia); else params.delete("dia");
+
+            const url = `${location.origin}${location.pathname}?${params.toString()}`;
+            await navigator.clipboard.writeText(url);
+            showToast("Link copiado ✅");
+          }catch(e){
+            showToast("No se pudo copiar 😅");
+          }
+        });
+      }
+    })();
+  </script>
+
+  <!-- App -->
+  <script type="module" src="./main.js"></script>
 </body>
 </html>
