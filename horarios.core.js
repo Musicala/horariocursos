@@ -2,9 +2,9 @@
 // ------------------------------------------------------------
 // Horarios Grupales · Musicala — Core (Split PRO balanced)
 // - Firestore + hydration + filters + views + renders + analytics + modal + CRUD
-// - FIX: exportJSON() expuesto en API (para que el botón Exportar funcione)
-// - Mejora: menos listeners repetidos, más consistencia, mejor perf en renders,
-//           filtros más robustos, analytics más claros, y export limpio.
+// - Export/Import JSON (backup / restore) con upsert por ID
+// - Perf: menos listeners repetidos, delegación en sesiones, fragments en renders
+// - Robust: normalización day/room/time, filtros tolerantes, analytics más claros
 // ------------------------------------------------------------
 
 'use strict';
@@ -13,29 +13,32 @@ export function initCore(ctx){
   const { els, state, utils, toast, perms } = ctx;
   const { DAYS, ROOMS, PEAK_HOURS, BASE_SLOTS } = ctx;
 
-  const CORE_VERSION = "core.v4.1-export";
+  const CORE_VERSION = "core.v4.2-export-import";
 
   /* =========================================================
      CONSTANTS / HELPERS
   ========================================================= */
   const VIEW_SET = new Set(["grid","list","dashboard","occupancy","conflicts","proposals"]);
 
+  // Si quieres, estos colores deberían vivir en CSS variables, pero bueno.
   const AREA_COLORS = {
-    music: "#0C41C4",
-    dance: "#CE0071",
+    music:  "#0C41C4",
+    dance:  "#CE0071",
     theater:"#680DBF",
-    arts:  "#220A63",
+    arts:   "#220A63",
   };
 
-  // Puedes ajustar/expandir con los nombres reales que uses en "edad"
+  // Ajusta según tus “edades” reales (son keys exactos)
   const AGE_COLORS = {
-    Musibabies:  "#0C41C4",
-    Musicalitos: "#5729FF",
-    Musikids:    "#680DBF",
-    Musiteens:   "#CE0071",
-    Musigrandes: "#220A63",
-    Musiadultos: "#0C0A1E",
+    Musibabies:   "#0C41C4",
+    Musicalitos:  "#5729FF",
+    Musikids:     "#680DBF",
+    Musiteens:    "#CE0071",
+    Musigrandes:  "#220A63",
+    Musiadultos:  "#0C0A1E",
   };
+
+  const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
 
   function safeSetLS(k, v){
     try{ localStorage.setItem(k, v); }catch(_){}
@@ -62,12 +65,12 @@ export function initCore(ctx){
   }
 
   function toneClassForGroup(g){
-    // Usa clase/enfoque para detectar área con tolerancia humana
+    // Detecta "área" por clase/enfoque, tolerancia humana
     const raw = `${g?.clase ?? ""} ${g?.enfoque ?? ""}`.toLowerCase();
     const n = utils.normalize(raw);
 
-    if (n.includes("danza") || n.includes("dan") || n.includes("ballet") || n.includes("hip hop")) return "dance";
-    if (n.includes("teatro") || n.includes("tea") || n.includes("actu")) return "theater";
+    if (n.includes("danza") || n.includes("ballet") || n.includes("hip hop") || n.includes("baile")) return "dance";
+    if (n.includes("teatro") || n.includes("actu") || n.includes("escena")) return "theater";
     if (n.includes("arte") || n.includes("plastica") || n.includes("pint") || n.includes("dibu")) return "arts";
     return "music";
   }
@@ -80,7 +83,7 @@ export function initCore(ctx){
     const arr = Array.isArray(sessions) ? sessions : [];
     return arr
       .map(s => ({
-        day: utils.canonDay((s?.day ?? "").trim()),
+        day:  utils.canonDay((s?.day ?? "").trim()),
         time: utils.normalizeHHMM(s?.time ?? ""),
         room: utils.canonRoom((s?.room ?? "").trim()),
       }))
@@ -102,14 +105,14 @@ export function initCore(ctx){
     for (const s of g.__sessions) ds.add(s.day);
     g.__days = ds;
 
-    g.__tone = toneClassForGroup(g);
+    g.__tone   = toneClassForGroup(g);
     g.__ageKey = ageKey(g);
 
     // Cupos normalizados (acepta variantes)
     g.__cupoMax = utils.clampInt(g?.cupoMax ?? g?.cupo_max ?? 0, 0);
     g.__cupoOcu = utils.clampInt(g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
 
-    // Texto búsqueda
+    // Búsqueda normalizada
     g.__search = utils.normalize([
       g.clase, g.edad, g.enfoque, g.nivel,
       (g.docente ?? ""), (g.salon ?? "")
@@ -123,12 +126,13 @@ export function initCore(ctx){
     const age  = g.__ageKey || ageKey(g);
 
     const areaHex = AREA_COLORS[tone] || "#0C41C4";
-    const ageHex  = AGE_COLORS[age] || "#0C41C4";
+    const ageHex  = AGE_COLORS[age]   || "#0C41C4";
 
     blockEl.dataset.tone = tone;
     if (age) blockEl.dataset.age = age;
 
     const hex = (state.colorMode === "area") ? areaHex : ageHex;
+
     blockEl.style.borderColor = hexToRGBA(hex, 0.55);
     blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, 0.12)}, rgba(255,255,255,0.92))`;
   }
@@ -154,8 +158,6 @@ export function initCore(ctx){
           snap.forEach(d => arr.push(hydrateGroup({ id: d.id, ...d.data() })));
           state.allGroups = arr;
 
-          ctx.DBG?.log("Firestore OK. Docs:", arr.length);
-
           fillFilterOptionsFromData(state.allGroups);
           applyFiltersAndRender();
 
@@ -177,14 +179,14 @@ export function initCore(ctx){
   }
 
   /* =========================================================
-     FILTER OPTIONS (auto, sin llenar basura infinita)
+     FILTER OPTIONS
   ========================================================= */
   function rebuildSelectOptions(selectEl, values, { keepFirstEmpty=true } = {}){
     if (!selectEl) return;
 
     const prev = (selectEl.value ?? "").toString();
-
     const firstOpt = keepFirstEmpty ? selectEl.options?.[0] : null;
+
     selectEl.innerHTML = "";
 
     if (keepFirstEmpty){
@@ -260,7 +262,7 @@ export function initCore(ctx){
   }
 
   /* =========================================================
-     VIEW MODE + UI TOGGLES
+     VIEW MODE + UI
   ========================================================= */
   function setPressed(btn, on){
     if (!btn) return;
@@ -335,7 +337,6 @@ export function initCore(ctx){
     document.body.classList.toggle("color-mode-age",  state.colorMode === "age");
     els.grid?.classList.toggle("color-mode-area", state.colorMode === "area");
     els.grid?.classList.toggle("color-mode-age",  state.colorMode === "age");
-
     safeSetLS(ctx.LS_COLOR_MODE, state.colorMode);
   }
 
@@ -837,10 +838,10 @@ export function initCore(ctx){
       const area = g.__tone || toneClassForGroup(g);
       const band = bandForTime(it.time);
 
-      byAgeSessions.set(age,  (byAgeSessions.get(age)  || 0) + 1);
-      byRoomSessions.set(room,(byRoomSessions.get(room)|| 0) + 1);
-      byAreaSessions.set(area,(byAreaSessions.get(area)|| 0) + 1);
-      byBandSessions.set(band,(byBandSessions.get(band)|| 0) + 1);
+      byAgeSessions.set(age,   (byAgeSessions.get(age)   || 0) + 1);
+      byRoomSessions.set(room, (byRoomSessions.get(room) || 0) + 1);
+      byAreaSessions.set(area, (byAreaSessions.get(area) || 0) + 1);
+      byBandSessions.set(band, (byBandSessions.get(band) || 0) + 1);
 
       const k = `${it.time}__${room}`;
       if (!occMap.has(k)) occMap.set(k, []);
@@ -890,8 +891,7 @@ export function initCore(ctx){
 
     setKPI(els.kpiCollisions, String(A.st.collisionsCells), els.kpiCollisionsSub, "Celdas con 2+ sesiones");
 
-    applyAnalyticsTabUI(state.activeAnaTab);
-
+    // Reset containers
     const top    = els.anaTopContent;
     const bottom = els.anaBottomContent;
     const alerts = els.anaAlertsContent;
@@ -900,6 +900,7 @@ export function initCore(ctx){
     if (bottom) bottom.innerHTML = "";
     if (alerts) alerts.innerHTML = "";
 
+    // Alerts
     if (alerts){
       const notes = A.st.notes.slice(0, 6);
       alerts.innerHTML = notes.length
@@ -1007,6 +1008,7 @@ export function initCore(ctx){
       `;
     };
 
+    // Conflicts view
     if (mode === "conflicts"){
       applyAnalyticsTabUI("dashboard");
       els.anaTopTitle && (els.anaTopTitle.textContent = "Celdas con choques");
@@ -1048,6 +1050,7 @@ export function initCore(ctx){
       return;
     }
 
+    // Proposals view
     if (mode === "proposals"){
       applyAnalyticsTabUI("dashboard");
       els.anaTopTitle && (els.anaTopTitle.textContent = "Huecos sugeridos");
@@ -1097,15 +1100,10 @@ export function initCore(ctx){
       return;
     }
 
-    if (mode === "occupancy"){
-      if (!["dashboard","edad","salon","area","franja"].includes(state.activeAnaTab)) applyAnalyticsTabUI("dashboard");
-      renderTabContent(state.activeAnaTab);
-      utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${dayCanon} · sesiones: ${A.st.sessionsCount}`);
-      return;
-    }
-
+    // Occupancy/dashboard (tabbed)
     if (!["dashboard","edad","salon","area","franja"].includes(state.activeAnaTab)) applyAnalyticsTabUI("dashboard");
     renderTabContent(state.activeAnaTab);
+
     utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${dayCanon} · sesiones: ${A.st.sessionsCount}`);
   }
 
@@ -1158,13 +1156,13 @@ export function initCore(ctx){
 
   function writeDraftToModal(d){
     if (!d) return;
-    if (els.mClase)     els.mClase.value = d.clase ?? "Música";
-    if (els.mEdad)      els.mEdad.value = d.edad ?? "Musikids";
-    if (els.mEnfoque)   els.mEnfoque.value = d.enfoque ?? "";
-    if (els.mNivel)     els.mNivel.value = d.nivel ?? "";
-    if (els.mCupoMax)   els.mCupoMax.value = String(utils.clampInt(d.cupoMax ?? 0, 0));
-    if (els.mCupoOcu)   els.mCupoOcu.value = String(utils.clampInt(d.cupoOcupado ?? 0, 0));
-    if (els.mActivo)    els.mActivo.checked = (d.activo !== false);
+    if (els.mClase)   els.mClase.value = d.clase ?? "Música";
+    if (els.mEdad)    els.mEdad.value = d.edad ?? "Musikids";
+    if (els.mEnfoque) els.mEnfoque.value = d.enfoque ?? "";
+    if (els.mNivel)   els.mNivel.value = d.nivel ?? "";
+    if (els.mCupoMax) els.mCupoMax.value = String(utils.clampInt(d.cupoMax ?? 0, 0));
+    if (els.mCupoOcu) els.mCupoOcu.value = String(utils.clampInt(d.cupoOcupado ?? 0, 0));
+    if (els.mActivo)  els.mActivo.checked = (d.activo !== false);
   }
 
   function readDraftFromModal(){
@@ -1184,7 +1182,7 @@ export function initCore(ctx){
     state.editingDraft.sessions = normalizeSessions(state.editingDraft.sessions);
   }
 
-  // ✅ Delegación: un solo listener para cambios/elim (evita acumulación)
+  // Delegación: un solo listener para cambios/elim
   function wireSessionsListDelegationOnce(){
     if (!els.sessionsList || els.sessionsList.__wired) return;
     els.sessionsList.__wired = true;
@@ -1390,7 +1388,6 @@ export function initCore(ctx){
       if (k.startsWith("__")) continue;
       out[k] = v;
     }
-    // Normaliza sessions por si viene rara
     out.sessions = normalizeSessions(out.sessions);
     return out;
   }
@@ -1441,6 +1438,119 @@ export function initCore(ctx){
   }
 
   /* =========================================================
+     IMPORT JSON (Restore)
+     - Acepta payload con {groups:[...]} o array directo
+     - Upsert por ID (setDoc) si viene g.id
+     - Si no trae id: crea nuevo (addDoc)
+     - En batchs pequeños para no reventar Firestore
+  ========================================================= */
+  async function importJSONFile(file){
+    if (!perms.canEdit()){
+      perms.explainNoPerm("importar");
+      return;
+    }
+    if (!file){
+      toast("No llegó archivo para importar.");
+      return;
+    }
+
+    try{
+      const text = await file.text();
+      let data;
+      try{
+        data = JSON.parse(text);
+      }catch(_){
+        toast("Ese archivo no parece JSON válido.");
+        return;
+      }
+
+      let groups = [];
+      if (Array.isArray(data)) groups = data;
+      else if (isObj(data) && Array.isArray(data.groups)) groups = data.groups;
+      else {
+        toast("JSON sin 'groups'. No sé qué querías que hiciera con eso.");
+        return;
+      }
+
+      // Sanitiza: quitar __*, normalizar sessions, defaults
+      const cleaned = groups
+        .filter(isObj)
+        .map(stripInternalFields)
+        .map(g => ({
+          ...g,
+          clase: (g.clase ?? "Música").toString().trim() || "Música",
+          edad:  (g.edad  ?? "Musikids").toString().trim() || "Musikids",
+          enfoque: (g.enfoque ?? "").toString().trim(),
+          nivel:   (g.nivel ?? "").toString().trim(),
+          cupoMax: utils.clampInt(g.cupoMax ?? g.cupo_max ?? 0, 0),
+          cupoOcupado: utils.clampInt(g.cupoOcupado ?? g.cupo_ocupado ?? 0, 0),
+          activo: (g.activo !== false),
+          sessions: normalizeSessions(g.sessions),
+        }))
+        .filter(g => Array.isArray(g.sessions) && g.sessions.length);
+
+      if (!cleaned.length){
+        toast("No hay grupos válidos para importar (¿sin sesiones?).");
+        return;
+      }
+
+      const ok = confirm(
+        `Vas a importar ${cleaned.length} grupo(s).\n` +
+        `Esto puede sobrescribir IDs existentes si coinciden.\n\n` +
+        `¿Continuar?`
+      );
+      if (!ok) return;
+
+      // Batch seguro: 35 por tanda para no saturar (y que UI no muera)
+      const CHUNK = 35;
+      let upserts = 0;
+      let creates = 0;
+
+      utils.setInfo(`Importando ${cleaned.length}…`);
+
+      for (let i=0; i<cleaned.length; i+=CHUNK){
+        const chunk = cleaned.slice(i, i+CHUNK);
+
+        // Importante: no guardar timestamps como strings raras.
+        // Si existe createdAt/updatedAt en el JSON, lo dejamos como está (puede ser string).
+        // Preferimos setear updatedAt a serverTimestamp para consistencia.
+        const promises = chunk.map(async (g) => {
+          const payload = {
+            ...g,
+            updatedAt: ctx.fs.serverTimestamp(),
+          };
+
+          // Si viene id, upsert por id
+          if (g.id){
+            const id = g.id;
+            const ref = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
+            await ctx.fs.setDoc(ref, payload, { merge: true });
+            upserts++;
+            return;
+          }
+
+          // Si no viene id: crear
+          payload.createdAt = ctx.fs.serverTimestamp();
+          await ctx.fs.addDoc(ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION), payload);
+          creates++;
+        });
+
+        await Promise.all(promises);
+      }
+
+      toast(`Importado ✅ Upsert: ${upserts} · Nuevos: ${creates}`);
+      utils.setInfo(`Importado ✅ (${cleaned.length})`);
+
+      // Refresca vista (snapshot debería actualizar solo, pero por UX)
+      applyFiltersAndRender();
+    }catch(err){
+      console.error(err);
+      perms.explainFirestoreErr?.(err);
+      toast("Falló la importación. Mira consola.");
+    }
+  }
+
+  /* =========================================================
      PUBLIC API
   ========================================================= */
   return {
@@ -1482,7 +1592,8 @@ export function initCore(ctx){
     saveGroup,
     deleteGroup,
 
-    // ✅ export
+    // backup
     exportJSON,
+    importJSONFile,
   };
 }
