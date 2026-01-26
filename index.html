@@ -29,6 +29,10 @@
   <!-- Icon -->
   <link rel="icon" href="./logo.png" />
 
+  <!-- Perf -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin />
+
   <!-- CSS -->
   <link rel="preload" href="./styles.css" as="style" />
   <link rel="stylesheet" href="./styles.css" />
@@ -95,13 +99,9 @@
       white-space:nowrap;border:0;
     }
 
-    /* ===== Contenedor de vistas (para evitar overlays tapando clicks) ===== */
-    .views{
-      display:block;
-    }
-    .view{
-      display:block;
-    }
+    /* ===== Contenedor de vistas ===== */
+    .views{ display:block; }
+    .view{ display:block; }
     .hidden{ display:none !important; }
 
     /* Stats panel (estructura; el look fino va en styles.css) */
@@ -117,9 +117,7 @@
       display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
       margin-bottom: 10px;
     }
-    .stats-title{
-      display:flex; flex-direction:column; gap:2px;
-    }
+    .stats-title{ display:flex; flex-direction:column; gap:2px; }
     .stats-title strong{ font-size: 13.5px; }
     .stats-title span{ font-size: 12px; color: rgba(107,114,128,.95); font-weight: 750; }
 
@@ -216,9 +214,7 @@
     .analytics-title{ display:flex; flex-direction:column; gap:3px; }
     .analytics-title strong{ font-size: 13.5px; }
     .analytics-title span{ font-size: 12px; color: rgba(107,114,128,.95); font-weight: 750; }
-    .analytics-tabs{
-      display:flex; gap:8px; flex-wrap:wrap;
-    }
+    .analytics-tabs{ display:flex; gap:8px; flex-wrap:wrap; }
 
     .mini-grid{
       display:grid;
@@ -287,7 +283,7 @@
 
   <!-- ================= HEADER ================= -->
   <header class="topbar" role="banner">
-    <div class="brand" id="brand-trigger" title="Musicala">
+    <div class="brand" id="brand-trigger" title="Musicala" role="button" tabindex="0" aria-label="Ir al inicio">
       <img
         src="./logo.png"
         alt="Musicala"
@@ -302,7 +298,7 @@
       </div>
     </div>
 
-    <div class="actions" aria-label="Acciones">
+    <div class="actions" aria-label="Acciones de sesión">
       <button id="btn-login" class="btn ghost hidden" type="button">Iniciar sesión</button>
       <button id="btn-logout" class="btn ghost hidden" type="button">Salir</button>
     </div>
@@ -321,7 +317,7 @@
           placeholder="Ej: Latino, Piano, Teatro, Musiteens…"
           autocomplete="off"
           inputmode="search"
-          aria-describedby="results-info"
+          aria-describedby="results-info search-help"
         />
         <div class="sr-only" id="search-help">Escribe para filtrar grupos por texto.</div>
       </div>
@@ -410,6 +406,15 @@
         <button id="btn-copy-link" class="btn small ghost" type="button" title="Copiar link con los filtros actuales">
           Copiar link
         </button>
+
+        <!-- Import / Export JSON (admin) -->
+        <button id="btn-export-json" class="btn small ghost hidden" type="button" title="Exportar JSON" aria-label="Exportar JSON">
+          Exportar
+        </button>
+        <button id="btn-import-json" class="btn small ghost hidden" type="button" title="Importar JSON" aria-label="Importar JSON">
+          Importar
+        </button>
+        <input id="file-import-json" class="sr-only" type="file" accept="application/json" />
 
         <!-- Nuevo -->
         <button id="btn-new-group" class="btn primary hidden" type="button">
@@ -512,7 +517,7 @@
       <!-- ===== GRID HORARIO ===== -->
       <section class="view" id="view-grid" aria-label="Tablero de horarios">
         <section class="schedule-wrap" id="grid-wrap">
-          <div class="schedule-scroll" role="region" aria-label="Tablero con desplazamiento">
+          <div class="schedule-scroll" role="region" aria-label="Tablero con desplazamiento" tabindex="0">
             <div id="schedule-grid" class="schedule-grid"></div>
           </div>
         </section>
@@ -521,7 +526,7 @@
       <!-- ===== LISTA ===== -->
       <section class="view hidden" id="view-list" aria-label="Lista de horarios">
         <section id="schedule-list-wrap" class="schedule-wrap">
-          <div class="schedule-scroll" role="region" aria-label="Lista con desplazamiento">
+          <div class="schedule-scroll" role="region" aria-label="Lista con desplazamiento" tabindex="0">
             <div id="schedule-list" class="schedule-list"></div>
           </div>
         </section>
@@ -732,6 +737,7 @@
       const KEY = "musicala_admin";
       const logo = document.getElementById("logo-trigger");
       const toast = document.getElementById("toast");
+      const brand = document.getElementById("brand-trigger");
       if (!logo) return;
 
       let clicks = 0;
@@ -744,6 +750,17 @@
         toast.classList.add("show");
         clearTimeout(showToast._t);
         showToast._t = setTimeout(() => toast.classList.remove("show"), 1600);
+      }
+
+      // Brand accesible (Enter/Espacio)
+      if (brand){
+        brand.addEventListener("keydown", (e) => {
+          const k = e.key;
+          if (k === "Enter" || k === " "){
+            e.preventDefault();
+            logo.click();
+          }
+        });
       }
 
       // 5 clicks -> admin ON
@@ -790,7 +807,8 @@
             if (edad) params.set("edad", edad); else params.delete("edad");
             if (dia) params.set("dia", dia); else params.delete("dia");
 
-            const url = `${location.origin}${location.pathname}?${params.toString()}`;
+            const qs = params.toString();
+            const url = `${location.origin}${location.pathname}${qs ? "?" + qs : ""}`;
             await navigator.clipboard.writeText(url);
             showToast("Link copiado ✅");
           }catch(e){
