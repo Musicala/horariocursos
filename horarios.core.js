@@ -1,10 +1,13 @@
 // horarios.core.js
 // ------------------------------------------------------------
-// Horarios Grupales · Musicala — Core (Split PRO balanced)
-// - Firestore + hydration + filters + views + renders + analytics + modal + CRUD
-// - Export/Import JSON (backup / restore) con upsert por ID
-// - Perf: menos listeners repetidos, delegación en sesiones, fragments en renders
-// - Robust: normalización day/room/time, filtros tolerantes, analytics más claros
+// Horarios Grupales · Musicala — Core (Simplificado PRO) v5.2
+// - Firestore: subscribe groups, CRUD, upsert import
+// - Vista: Grid / Lista (main.js controla UI; core renderiza según state.activeView)
+// - Filtros: grupo, búsqueda, clase, edad
+// - Modal: crear/editar/eliminar + sesiones (día/hora/salón)
+// - Backup: export/import JSON
+// - ✅ Anti-choques: valida ocupación global al guardar (día/hora/salón)
+// - Perf: delegación de eventos en grid, fragments, renders limpios, render cache
 // ------------------------------------------------------------
 
 'use strict';
@@ -13,14 +16,11 @@ export function initCore(ctx){
   const { els, state, utils, toast, perms } = ctx;
   const { DAYS, ROOMS, PEAK_HOURS, BASE_SLOTS } = ctx;
 
-  const CORE_VERSION = "core.v4.2-export-import";
+  const CORE_VERSION = "core.v5.2-grid-list-modal-backup-anti-collisions";
 
   /* =========================================================
      CONSTANTS / HELPERS
   ========================================================= */
-  const VIEW_SET = new Set(["grid","list","dashboard","occupancy","conflicts","proposals"]);
-
-  // Si quieres, estos colores deberían vivir en CSS variables, pero bueno.
   const AREA_COLORS = {
     music:  "#0C41C4",
     dance:  "#CE0071",
@@ -28,7 +28,6 @@ export function initCore(ctx){
     arts:   "#220A63",
   };
 
-  // Ajusta según tus “edades” reales (son keys exactos)
   const AGE_COLORS = {
     Musibabies:   "#0C41C4",
     Musicalitos:  "#5729FF",
@@ -37,15 +36,6 @@ export function initCore(ctx){
     Musigrandes:  "#220A63",
     Musiadultos:  "#0C0A1E",
   };
-
-  const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
-
-  function safeSetLS(k, v){
-    try{ localStorage.setItem(k, v); }catch(_){}
-  }
-  function safeGetLS(k){
-    try{ return localStorage.getItem(k); }catch(_){ return null; }
-  }
 
   function hexToRGBA(hex, a){
     const h = (hex || "").replace("#","").trim();
@@ -56,22 +46,13 @@ export function initCore(ctx){
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  function bandForTime(hhmm){
-    const m = utils.safeTimeToMinutes(hhmm);
-    if (m < 12*60) return "Mañana";
-    if (m < 16*60) return "Mediodía";
-    if (m < 20*60) return "Tarde";
-    return "Noche";
-  }
-
   function toneClassForGroup(g){
-    // Detecta "área" por clase/enfoque, tolerancia humana
     const raw = `${g?.clase ?? ""} ${g?.enfoque ?? ""}`.toLowerCase();
     const n = utils.normalize(raw);
 
     if (n.includes("danza") || n.includes("ballet") || n.includes("hip hop") || n.includes("baile")) return "dance";
     if (n.includes("teatro") || n.includes("actu") || n.includes("escena")) return "theater";
-    if (n.includes("arte") || n.includes("plastica") || n.includes("pint") || n.includes("dibu")) return "arts";
+    if (n.includes("arte") || n.includes("plastica") || n.includes("plástica") || n.includes("pint") || n.includes("dibu")) return "arts";
     return "music";
   }
 
@@ -83,16 +64,16 @@ export function initCore(ctx){
     const arr = Array.isArray(sessions) ? sessions : [];
     return arr
       .map(s => ({
-        day:  utils.canonDay((s?.day ?? "").trim()),
-        time: utils.normalizeHHMM(s?.time ?? ""),
-        room: utils.canonRoom((s?.room ?? "").trim()),
+        day:  utils.canonDay((s?.day ?? "").toString().trim()),
+        time: utils.normalizeHHMM((s?.time ?? "").toString().trim()),
+        room: utils.canonRoom((s?.room ?? "").toString().trim()),
       }))
       .filter(s => s.day && s.time && s.room && DAYS.includes(s.day))
       .sort(utils.compareSessions);
   }
 
   function hydrateGroup(raw){
-    const g = { ...raw };
+    const g = { ...(raw || {}) };
 
     g.clase   = (g.clase ?? "").toString().trim();
     g.edad    = (g.edad ?? "").toString().trim();
@@ -100,28 +81,23 @@ export function initCore(ctx){
     g.nivel   = (g.nivel ?? "").toString().trim();
 
     g.__sessions = normalizeSessions(g.sessions);
+    g.__tone     = toneClassForGroup(g);
+    g.__ageKey   = ageKey(g);
 
-    const ds = new Set();
-    for (const s of g.__sessions) ds.add(s.day);
-    g.__days = ds;
-
-    g.__tone   = toneClassForGroup(g);
-    g.__ageKey = ageKey(g);
-
-    // Cupos normalizados (acepta variantes)
     g.__cupoMax = utils.clampInt(g?.cupoMax ?? g?.cupo_max ?? 0, 0);
     g.__cupoOcu = utils.clampInt(g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
 
-    // Búsqueda normalizada
     g.__search = utils.normalize([
       g.clase, g.edad, g.enfoque, g.nivel,
-      (g.docente ?? ""), (g.salon ?? "")
+      (g.docente ?? ""), (g.notas ?? "")
     ].filter(Boolean).join(" "));
 
     return g;
   }
 
   function applyBlockColors(blockEl, g){
+    if (!blockEl || !g) return;
+
     const tone = g.__tone || toneClassForGroup(g);
     const age  = g.__ageKey || ageKey(g);
 
@@ -134,7 +110,37 @@ export function initCore(ctx){
     const hex = (state.colorMode === "area") ? areaHex : ageHex;
 
     blockEl.style.borderColor = hexToRGBA(hex, 0.55);
-    blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, 0.12)}, rgba(255,255,255,0.92))`;
+    blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, 0.12)}, rgba(255,255,255,0.94))`;
+  }
+
+  function safeElSetText(el, txt){
+    if (!el) return;
+    el.textContent = txt ?? "";
+  }
+
+  /* =========================================================
+     RENDER CACHE (simple)
+  ========================================================= */
+  const renderCache = {
+    key: "",
+    reset(){ this.key = ""; }
+  };
+
+  function computeKey(){
+    const q = utils.normalize(els.search?.value ?? "");
+    const clase = (els.fClase?.value ?? "").trim();
+    const edad  = (els.fEdad?.value ?? "").trim();
+    const gid   = (els.groupSelect?.value ?? "").trim();
+
+    // Ojo: no dependas de filteredGroups length, eso cambia dentro del render.
+    return [
+      state.activeDay,
+      state.activeView,
+      state.colorMode,
+      state.helpersOn ? "H1" : "H0",
+      q, clase, edad, gid,
+      (state.allGroups?.length ?? 0),
+    ].join("::");
   }
 
   /* =========================================================
@@ -142,7 +148,7 @@ export function initCore(ctx){
   ========================================================= */
   function subscribeGroupsOnce(){
     if (state.unsubscribeGroups){
-      state.unsubscribeGroups();
+      try{ state.unsubscribeGroups(); }catch(_){}
       state.unsubscribeGroups = null;
     }
 
@@ -158,8 +164,10 @@ export function initCore(ctx){
           snap.forEach(d => arr.push(hydrateGroup({ id: d.id, ...d.data() })));
           state.allGroups = arr;
 
-          fillFilterOptionsFromData(state.allGroups);
-          applyFiltersAndRender();
+          syncGroupSelectOptions();
+          fillFilterOptionsFromData(arr);
+
+          applyFiltersAndRender({ force:true });
 
           if (arr.length === 0){
             utils.setInfo("No hay grupos en Firestore todavía (colección 'groups' vacía).");
@@ -168,40 +176,41 @@ export function initCore(ctx){
         (err) => {
           console.error(err);
           utils.setInfo("No se pudieron cargar los horarios.");
-          toast("Firestore bloqueó la lectura (Rules) o no hay conexión.");
+          toast("Firestore bloqueó la lectura (Rules) o no hay conexión.", "warn");
         }
       );
     }catch(err){
       console.error(err);
       utils.setInfo("Error conectando a Firestore.");
-      toast("Error conectando a Firestore. Revisa firebase.js / rutas.");
+      toast("Error conectando a Firestore. Revisa firebase.js / rutas.", "danger");
     }
+  }
+
+  async function reload({ force=false } = {}){
+    if (force) renderCache.reset();
+    subscribeGroupsOnce();
+  }
+
+  function onAuthChanged(){
+    // Hoy no hay auth, pero se deja por compatibilidad
   }
 
   /* =========================================================
      FILTER OPTIONS
   ========================================================= */
-  function rebuildSelectOptions(selectEl, values, { keepFirstEmpty=true } = {}){
+  function rebuildSelectOptions(selectEl, values, { keepFirstEmpty=true, firstLabel="Todos" } = {}){
     if (!selectEl) return;
 
     const prev = (selectEl.value ?? "").toString();
-    const firstOpt = keepFirstEmpty ? selectEl.options?.[0] : null;
 
-    selectEl.innerHTML = "";
-
+    let html = "";
     if (keepFirstEmpty){
-      const opt = document.createElement("option");
-      opt.value = firstOpt?.value ?? "";
-      opt.textContent = firstOpt?.textContent ?? "Todos";
-      selectEl.appendChild(opt);
+      html += `<option value="">${utils.htmlEscape(firstLabel)}</option>`;
     }
-
     for (const v of values){
-      const opt = document.createElement("option");
-      opt.value = v;
-      opt.textContent = v;
-      selectEl.appendChild(opt);
+      html += `<option value="${utils.htmlEscape(v)}">${utils.htmlEscape(v)}</option>`;
     }
+    selectEl.innerHTML = html;
 
     const exists = Array.from(selectEl.options).some(o => o.value === prev);
     if (exists) selectEl.value = prev;
@@ -210,21 +219,51 @@ export function initCore(ctx){
   function fillFilterOptionsFromData(groups){
     const clases = new Set();
     const edades = new Set();
-    const dias   = new Set();
 
     for (const g of groups){
       if (g?.clase) clases.add(g.clase);
       if (g?.edad)  edades.add(g.edad);
-      for (const d of (g.__days || [])) dias.add(d);
     }
 
     const clasesArr = Array.from(clases).sort((a,b)=>a.localeCompare(b,"es"));
     const edadesArr = Array.from(edades).sort((a,b)=>a.localeCompare(b,"es"));
-    const diasArr   = Array.from(dias).sort((a,b)=>DAYS.indexOf(a)-DAYS.indexOf(b));
 
-    rebuildSelectOptions(els.fClase, clasesArr, { keepFirstEmpty:true });
-    rebuildSelectOptions(els.fEdad,  edadesArr, { keepFirstEmpty:true });
-    rebuildSelectOptions(els.fDia,   diasArr,   { keepFirstEmpty:true });
+    rebuildSelectOptions(els.fClase, clasesArr, { keepFirstEmpty:true, firstLabel:"Todas las clases" });
+    rebuildSelectOptions(els.fEdad,  edadesArr, { keepFirstEmpty:true, firstLabel:"Todas las edades" });
+  }
+
+  function syncGroupSelectOptions(){
+    const sel = els.groupSelect;
+    if (!sel) return;
+
+    const groups = state.allGroups || [];
+    const current = (sel.value ?? "").toString();
+
+    const frag = document.createDocumentFragment();
+    const first = document.createElement("option");
+    first.value = "";
+    first.textContent = "Todos los grupos";
+    frag.appendChild(first);
+
+    groups
+      .slice()
+      .sort((a,b) => {
+        const aa = [a?.enfoque, a?.edad, a?.clase].filter(Boolean).join(" · ");
+        const bb = [b?.enfoque, b?.edad, b?.clase].filter(Boolean).join(" · ");
+        return aa.localeCompare(bb, "es");
+      })
+      .forEach(g => {
+        const o = document.createElement("option");
+        o.value = g.id;
+        const label = [g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ");
+        o.textContent = label || g.id;
+        frag.appendChild(o);
+      });
+
+    sel.innerHTML = "";
+    sel.appendChild(frag);
+
+    if (current && groups.some(g => g.id === current)) sel.value = current;
   }
 
   /* =========================================================
@@ -235,129 +274,84 @@ export function initCore(ctx){
       search: utils.normalize(els.search?.value ?? ""),
       clase: (els.fClase?.value ?? "").trim(),
       edad:  (els.fEdad?.value ?? "").trim(),
-      dia:   (els.fDia?.value ?? "").trim(),
+      groupId: (els.groupSelect?.value ?? "").trim(),
     };
   }
 
   function groupMatches(g, f){
+    if (!g) return false;
+    if (f.groupId && (g?.id ?? "") !== f.groupId) return false;
     if (f.clase && (g?.clase ?? "") !== f.clase) return false;
     if (f.edad  && (g?.edad  ?? "") !== f.edad)  return false;
-
-    if (f.dia){
-      const want = utils.canonDay(f.dia);
-      if (!g?.__days?.has?.(want)) return false;
-    }
 
     if (f.search){
       const hay = g?.__search ?? "";
       if (!hay.includes(f.search)) return false;
     }
-
     return true;
   }
 
   function applyFilters(){
     const f = getFilterState();
-    state.filteredGroups = state.allGroups.filter(g => groupMatches(g, f));
+    const all = state.allGroups || [];
+    state.filteredGroups = all.filter(g => groupMatches(g, f));
   }
 
   /* =========================================================
-     VIEW MODE + UI
+     COLLISION CHECK (GLOBAL) — ✅ CLAVE
+     - Revisa si alguna sesión del payload choca con sesiones de otros grupos
+     - Excluye el mismo grupo si estamos editando (sameId)
   ========================================================= */
-  function setPressed(btn, on){
-    if (!btn) return;
-    btn.classList.toggle("ghost", !on);
-    btn.setAttribute("aria-pressed", on ? "true" : "false");
-  }
+  function buildGlobalOccupancyIndex(groups, { excludeId=null } = {}){
+    const occ = new Map(); // key -> { groupId, label }
+    for (const g0 of (groups || [])){
+      const g = hydrateGroup(g0);
+      const gid = g?.id || "";
+      if (excludeId && gid === excludeId) continue;
 
-  function showOnly(mode){
-    const showGrid = (mode === "grid");
-    const showList = (mode === "list");
-    const showAna  = (mode === "dashboard" || mode === "occupancy" || mode === "conflicts" || mode === "proposals");
+      const label = [g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ") || gid || "Grupo";
 
-    els.gridWrap?.classList.toggle("hidden", !showGrid);
-    els.listWrap?.classList.toggle("hidden", !showList);
-    els.analyticsWrap?.classList.toggle("hidden", !showAna);
-
-    const showDaybar = (showGrid || showList);
-    els.daybarWrap?.classList.toggle("hidden", !showDaybar);
-    els.ageLegendWrap?.classList.toggle("hidden", !showDaybar);
-
-    els.quickStatsWrap?.classList.toggle("hidden", showAna);
-  }
-
-  function setView(mode){
-    const m = VIEW_SET.has(mode) ? mode : "grid";
-    state.activeView = m;
-
-    setPressed(els.btnViewGrid,       m === "grid");
-    setPressed(els.btnViewList,       m === "list");
-    setPressed(els.btnViewDashboard,  m === "dashboard");
-    setPressed(els.btnViewOccupancy,  m === "occupancy");
-    setPressed(els.btnViewConflicts,  m === "conflicts");
-    setPressed(els.btnViewProposals,  m === "proposals");
-
-    showOnly(m);
-
-    if (m === "grid") renderGrid();
-    else if (m === "list") renderList();
-    else renderAnalytics(m);
-
-    safeSetLS(ctx.LS_VIEW, m);
-  }
-
-  function initViewFromStorage(){
-    const m = safeGetLS(ctx.LS_VIEW);
-    if (m && VIEW_SET.has(m)) state.activeView = m;
-  }
-
-  /* =========================================================
-     COLOR + HELPERS
-  ========================================================= */
-  function initUIModes(){
-    const cm = safeGetLS(ctx.LS_COLOR_MODE);
-    if (cm === "area" || cm === "age") state.colorMode = cm;
-
-    if (els.colorByArea) els.colorByArea.checked = (state.colorMode === "area");
-    if (els.colorByAge)  els.colorByAge.checked  = (state.colorMode === "age");
-
-    const h = safeGetLS(ctx.LS_HELPERS);
-    if (h === "0") state.helpersOn = false;
-
-    const t = safeGetLS(ctx.LS_ANA_TAB);
-    if (t) state.activeAnaTab = t;
-
-    applyHelpersUI();
-    applyColorModeUI();
-    applyAnalyticsTabUI(state.activeAnaTab);
-  }
-
-  function applyColorModeUI(){
-    document.body.classList.toggle("color-mode-area", state.colorMode === "area");
-    document.body.classList.toggle("color-mode-age",  state.colorMode === "age");
-    els.grid?.classList.toggle("color-mode-area", state.colorMode === "area");
-    els.grid?.classList.toggle("color-mode-age",  state.colorMode === "age");
-    safeSetLS(ctx.LS_COLOR_MODE, state.colorMode);
-  }
-
-  function applyHelpersUI(){
-    document.body.classList.toggle("helpers-off", !state.helpersOn);
-    if (els.btnToggleHelpers){
-      els.btnToggleHelpers.setAttribute("aria-pressed", state.helpersOn ? "true" : "false");
-      els.btnToggleHelpers.textContent = state.helpersOn ? "Ayudas" : "Ayudas (off)";
+      for (const s of (g.__sessions || [])){
+        const key = `${s.day}__${s.time}__${s.room}`;
+        if (!occ.has(key)){
+          occ.set(key, { groupId: gid, label });
+        }
+      }
     }
-    safeSetLS(ctx.LS_HELPERS, state.helpersOn ? "1" : "0");
+    return occ;
+  }
+
+  function findFirstCollision(payloadSessions, occIndex){
+    for (const s of (payloadSessions || [])){
+      const key = `${s.day}__${s.time}__${s.room}`;
+      const hit = occIndex.get(key);
+      if (hit){
+        return { session: s, hit };
+      }
+    }
+    return null;
+  }
+
+  function hasDuplicateInsideSameGroup(payloadSessions){
+    const seen = new Set();
+    for (const s of (payloadSessions || [])){
+      const key = `${s.day}__${s.time}__${s.room}`;
+      if (seen.has(key)) return true;
+      seen.add(key);
+    }
+    return false;
   }
 
   /* =========================================================
-     STATS / ALERTS
+     STATS
   ========================================================= */
   function sessionsForDay(groups, day){
     const out = [];
     const dayCanon = utils.canonDay(day);
 
-    for (const g of groups){
-      const sessions = g.__sessions || normalizeSessions(g?.sessions);
+    for (const g0 of groups){
+      const g = hydrateGroup(g0);
+      const sessions = g.__sessions || [];
       for (const s of sessions){
         if (s.day !== dayCanon) continue;
         out.push({ group: g, day: dayCanon, time: s.time, room: s.room });
@@ -369,185 +363,407 @@ export function initCore(ctx){
   }
 
   function computeStats(groups, day){
-    const dayCanon = utils.canonDay(day);
-
-    const out = {
-      groupsCount: groups.length,
-      sessionsCount: 0,
-      roomsUsedCount: 0,
-      byArea: { music:0, dance:0, theater:0, arts:0 },
-      byAge: new Map(),
-      collisionsCells: 0,
-      conflictsExtras: 0,
-      peakSessions: 0,
-      cupoMaxSum: 0,
-      cupoOcuSum: 0,
-      notes: []
-    };
-
+    const daySessions = sessionsForDay(groups, day);
     const roomsUsed = new Set();
     const occ = new Map(); // time__room -> count
 
-    const groupsInDay = new Set();
-    const daySessions = sessionsForDay(groups, dayCanon);
-    for (const it of daySessions) groupsInDay.add(it.group?.id || it.group);
-
-    for (const g of groups){
-      const tone = g.__tone || toneClassForGroup(g);
-      if (tone === "music") out.byArea.music++;
-      else if (tone === "dance") out.byArea.dance++;
-      else if (tone === "theater") out.byArea.theater++;
-      else if (tone === "arts") out.byArea.arts++;
-
-      const ak = g.__ageKey || ageKey(g);
-      if (ak) out.byAge.set(ak, (out.byAge.get(ak) || 0) + 1);
-
-      if (groupsInDay.has(g?.id || g)){
-        out.cupoMaxSum += utils.clampInt(g.__cupoMax ?? 0, 0);
-        out.cupoOcuSum += utils.clampInt(g.__cupoOcu ?? 0, 0);
-      }
-    }
+    let peakSessions = 0;
+    let cupoMaxSum = 0;
+    let cupoOcuSum = 0;
 
     for (const it of daySessions){
-      const time = it.time;
-      const room = it.room;
-      if (!time || !room) continue;
+      roomsUsed.add(it.room);
+      if (PEAK_HOURS?.has?.(it.time)) peakSessions++;
 
-      out.sessionsCount++;
-      roomsUsed.add(room);
-
-      if (PEAK_HOURS.has(time)) out.peakSessions++;
-
-      const k = `${time}__${room}`;
+      const k = `${it.time}__${it.room}`;
       occ.set(k, (occ.get(k) || 0) + 1);
-    }
 
-    out.roomsUsedCount = roomsUsed.size;
-
-    for (const [, c] of occ){
-      if (c > 1){
-        out.collisionsCells += 1;
-        out.conflictsExtras += (c - 1);
+      const g = it.group;
+      const mx = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
+      const oc = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
+      if (mx > 0){
+        cupoMaxSum += mx;
+        cupoOcuSum += oc;
       }
     }
 
-    const a = out.byArea;
-    const total = Math.max(1, out.groupsCount);
-    const share = (n) => n / total;
-    const maxShare = Math.max(share(a.music), share(a.dance), share(a.theater), share(a.arts));
-    const minShare = Math.min(share(a.music), share(a.dance), share(a.theater), share(a.arts));
+    let collisionsCells = 0;
+    let conflictsExtras = 0;
+    for (const [, c] of occ){
+      if (c > 1){
+        collisionsCells++;
+        conflictsExtras += (c - 1);
+      }
+    }
 
-    if (out.conflictsExtras > 0){
-      out.notes.push(`Hay ${out.conflictsExtras} choque(s) extra en ${dayCanon} (mismo salón y hora).`);
+    return {
+      groupsCount: (groups || []).length,
+      sessionsCount: daySessions.length,
+      roomsUsedCount: roomsUsed.size,
+      peakSessions,
+      collisionsCells,
+      conflictsExtras,
+      cupoMaxSum,
+      cupoOcuSum,
+      daySessions,
+    };
+  }
+
+  function renderStats(){
+    // Stats “clásicos” si existen en el HTML (no asumimos)
+    const st = computeStats(state.filteredGroups, state.activeDay);
+
+    safeElSetText(els.statTotalGroups,   String(st.groupsCount));
+    safeElSetText(els.statTotalSessions, String(st.sessionsCount));
+    safeElSetText(els.statTotalRooms,    String(st.roomsUsedCount));
+
+    if (els.analyticsSubtitle){
+      els.analyticsSubtitle.textContent =
+        `Día: ${state.activeDay} · Sesiones: ${st.sessionsCount} · Choques: ${st.conflictsExtras}`;
     }
-    if (maxShare >= 0.55 && total >= 8){
-      out.notes.push("Una sola área domina mucho el horario (equilibrio por áreas).");
+
+    if (els.anaAlertsContent){
+      const notes = [];
+      if (st.conflictsExtras > 0) notes.push(`Hay ${st.conflictsExtras} choque(s) extra (mismo salón y hora).`);
+      if (st.peakSessions >= 10) notes.push("Hora pico está bien cargada (ojo choques).");
+      if (st.cupoMaxSum > 0){
+        const ocu = st.cupoOcuSum / Math.max(1, st.cupoMaxSum);
+        if (ocu >= 0.92) notes.push("Ocupación muy alta: si entra demanda, se te estalla el cupo.");
+        if (ocu <= 0.25 && st.sessionsCount >= 8) notes.push("Ocupación baja: revisa mezcla de grupos o estrategia.");
+      }
+
+      els.anaAlertsContent.innerHTML = notes.length
+        ? `<div style="display:flex;flex-direction:column;gap:8px;">
+             ${notes.slice(0,6).map(n => `<div class="alert-row">${utils.htmlEscape(n)}</div>`).join("")}
+           </div>`
+        : `<div style="font-weight:800;color:rgba(107,114,128,.95);">Sin alertas por ahora.</div>`;
     }
-    if (minShare <= 0.08 && total >= 10){
-      out.notes.push("Hay un área casi ausente en la distribución (ojo si es accidental).");
+  }
+
+  /* =========================================================
+     MODAL + CRUD
+  ========================================================= */
+  const M = {
+    modal: els.modal,
+    btnClose: els.btnModalClose,
+    btnSave: els.btnModalSave,
+    btnDelete: els.btnModalDelete,
+    btnAddSession: els.btnAddSession,
+    sessionsWrap: els.modalSessionsWrap,
+
+    inClase: els.inClase,
+    inEdad: els.inEdad,
+    inEnfoque: els.inEnfoque,
+    inNivel: els.inNivel,
+    inCupoMax: els.inCupoMax,
+    inCupoOcu: els.inCupoOcu,
+    inActivo: els.inActivo,
+  };
+
+  function modalOpen(){
+    if (!M.modal) return;
+
+    M.modal.classList.remove("hidden");
+    M.modal.classList.add("open");
+    M.modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("modal-open");
+
+    M.inEnfoque?.focus?.({ preventScroll:true });
+  }
+
+  function modalClose(){
+    if (!M.modal) return;
+
+    M.modal.classList.remove("open");
+    M.modal.classList.add("hidden");
+    M.modal.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("modal-open");
+  }
+
+  function clearSessionsUI(){
+    if (!M.sessionsWrap) return;
+    M.sessionsWrap.innerHTML = "";
+  }
+
+  function makeSessionRow({ day="", time="", room="" } = {}){
+    const row = document.createElement("div");
+    row.className = "session-row";
+
+    const daySel = document.createElement("select");
+    daySel.className = "session-day";
+    daySel.innerHTML = DAYS
+      .map(d => `<option value="${utils.htmlEscape(d)}"${d===day?" selected":""}>${utils.htmlEscape(d)}</option>`)
+      .join("");
+
+    const timeInp = document.createElement("input");
+    timeInp.type = "time";
+    timeInp.className = "session-time";
+    timeInp.value = utils.normalizeHHMM(time) || "15:00";
+
+    const roomSel = document.createElement("select");
+    roomSel.className = "session-room";
+    roomSel.innerHTML = ROOMS
+      .map(r => `<option value="${utils.htmlEscape(r.key)}"${r.key===room?" selected":""}>${utils.htmlEscape(r.label)}</option>`)
+      .join("");
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "session-del";
+    del.textContent = "Quitar";
+    del.addEventListener("click", () => row.remove());
+
+    row.appendChild(daySel);
+    row.appendChild(timeInp);
+    row.appendChild(roomSel);
+    row.appendChild(del);
+
+    return row;
+  }
+
+  function readSessionsFromUI(){
+    if (!M.sessionsWrap) return [];
+    const rows = Array.from(M.sessionsWrap.querySelectorAll(".session-row"));
+    const sessions = rows.map(row => {
+      const day  = row.querySelector(".session-day")?.value ?? "";
+      const time = row.querySelector(".session-time")?.value ?? "";
+      const room = row.querySelector(".session-room")?.value ?? "";
+      return {
+        day:  utils.canonDay(day),
+        time: utils.normalizeHHMM(time),
+        room: utils.canonRoom(room),
+      };
+    });
+    return normalizeSessions(sessions);
+  }
+
+  function writeSessionsToUI(sessions){
+    clearSessionsUI();
+    if (!M.sessionsWrap) return;
+
+    const arr = normalizeSessions(sessions);
+    const frag = document.createDocumentFragment();
+    for (const s of arr){
+      frag.appendChild(makeSessionRow(s));
     }
-    if (out.peakSessions >= 10){
-      out.notes.push("Hora pico está bastante cargada (bien para demanda, ojo choques).");
+    M.sessionsWrap.appendChild(frag);
+  }
+
+  function modalSetMode({ isNew=false } = {}){
+    const can = perms.canEdit();
+
+    if (M.btnSave)   M.btnSave.classList.toggle("hidden", !can);
+    if (M.btnDelete) M.btnDelete.classList.toggle("hidden", !can || isNew);
+
+    if (M.modal){
+      M.modal.querySelectorAll("input,select,textarea,button.session-del").forEach(el => {
+        if (el === M.btnClose) return;
+        el.disabled = !can;
+      });
     }
+  }
+
+  function modalFill(g, { isNew=false } = {}){
+    if (!g) return;
+
+    if (M.inClase)   M.inClase.value   = g.clase || "";
+    if (M.inEdad)    M.inEdad.value    = g.edad || "";
+    if (M.inEnfoque) M.inEnfoque.value = g.enfoque || "";
+    if (M.inNivel)   M.inNivel.value   = g.nivel || "";
+
+    if (M.inCupoMax) M.inCupoMax.value = String(utils.clampInt(g.__cupoMax ?? g.cupoMax ?? g.cupo_max ?? 0, 0));
+    if (M.inCupoOcu) M.inCupoOcu.value = String(utils.clampInt(g.__cupoOcu ?? g.cupoOcupado ?? g.cupo_ocupado ?? 0, 0));
+
+    if (M.inActivo){
+      const v = (g.activo == null) ? true : !!g.activo;
+      M.inActivo.checked = v;
+    }
+
+    writeSessionsToUI(g.__sessions || g.sessions || []);
+    modalSetMode({ isNew });
+  }
+
+  function modalRead(){
+    const out = {
+      clase:   (M.inClase?.value ?? "").trim(),
+      edad:    (M.inEdad?.value ?? "").trim(),
+      enfoque: (M.inEnfoque?.value ?? "").trim(),
+      nivel:   (M.inNivel?.value ?? "").trim(),
+      cupoMax: utils.clampInt(M.inCupoMax?.value ?? 0, 0),
+      cupoOcupado: utils.clampInt(M.inCupoOcu?.value ?? 0, 0),
+      activo: (M.inActivo ? !!M.inActivo.checked : true),
+      sessions: readSessionsFromUI(),
+      updatedAt: Date.now(),
+    };
+
+    if (!out.clase) delete out.clase;
+    if (!out.edad) delete out.edad;
+    if (!out.enfoque) delete out.enfoque;
+    if (!out.nivel) delete out.nivel;
 
     return out;
   }
 
-  function renderStats(){
-    const st = computeStats(state.filteredGroups, state.activeDay);
+  function openModalForGroup(g){
+    const hg = hydrateGroup(g);
+    state.activeGroup = hg;
 
-    if (els.statTotalGroups)   els.statTotalGroups.textContent   = String(st.groupsCount);
-    if (els.statTotalSessions) els.statTotalSessions.textContent = String(st.sessionsCount);
-    if (els.statTotalRooms)    els.statTotalRooms.textContent    = String(st.roomsUsedCount);
-
-    if (els.statsByArea){
-      const setVal = (k, v) => {
-        const el = els.statsByArea.querySelector(`[data-k="${k}"]`);
-        if (el) el.textContent = String(v);
-      };
-      setVal("music", st.byArea.music);
-      setVal("dance", st.byArea.dance);
-      setVal("theater", st.byArea.theater);
-      setVal("arts", st.byArea.arts);
-    }
-
-    if (els.statsByAge){
-      els.statsByAge.querySelectorAll("[data-k]").forEach(el => {
-        const k = el.getAttribute("data-k");
-        el.textContent = String(st.byAge.get(k) || 0);
-      });
-    }
-
-    if (els.statsSubtitle){
-      els.statsSubtitle.textContent =
-        `Día: ${state.activeDay} · Sesiones: ${st.sessionsCount} · Choques: ${st.conflictsExtras}`;
-    }
-
-    if (els.statsAlerts){
-      els.statsAlerts.innerHTML = "";
-      const notes = st.notes.slice(0, 4);
-      for (const n of notes){
-        const div = document.createElement("div");
-        div.className = "alert-row";
-        div.textContent = n;
-        els.statsAlerts.appendChild(div);
-      }
-    }
+    modalFill(hg, { isNew:false });
+    modalOpen();
   }
 
-  /* =========================================================
-     DAY UI SYNC + TABS
-  ========================================================= */
-  function syncDayUI(newDay, { fromSelect=false } = {}){
-    const d = utils.canonDay(newDay);
-    if (!DAYS.includes(d)) return;
+  function openModalNewAt(day, time, room){
+    state.activeGroup = null;
 
-    state.activeDay = d;
-
-    if (els.fDia){
-      const cur = utils.canonDay(els.fDia.value || "");
-      if (!fromSelect || cur !== d) els.fDia.value = d;
-    }
-
-    renderDayTabs();
-    renderStats();
-
-    if (state.activeView === "grid") renderGrid();
-    else if (state.activeView === "list") renderList();
-    else renderAnalytics(state.activeView);
-
-    utils.writeFiltersToURL();
-  }
-
-  function renderDayTabs(){
-    if (!els.dayTabs) return;
-    els.dayTabs.innerHTML = "";
-
-    const frag = document.createDocumentFragment();
-
-    DAYS.forEach((day) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "day-tab" + (day === state.activeDay ? " active" : "");
-      btn.textContent = day;
-      btn.setAttribute("role", "tab");
-      btn.setAttribute("aria-selected", day === state.activeDay ? "true" : "false");
-      btn.addEventListener("click", () => syncDayUI(day));
-      frag.appendChild(btn);
+    const draft = hydrateGroup({
+      clase: "",
+      edad: "",
+      enfoque: "",
+      nivel: "",
+      cupoMax: 0,
+      cupoOcupado: 0,
+      activo: true,
+      sessions: [{ day, time, room }],
     });
 
-    els.dayTabs.appendChild(frag);
+    state.__draftNew = draft;
+    modalFill(draft, { isNew:true });
+    modalOpen();
+  }
+
+  async function saveGroup(){
+    if (!perms.canEdit()){
+      perms.explainNoPerm("guardar");
+      return;
+    }
+
+    const payload = modalRead();
+
+    if (!payload.enfoque && !payload.clase){
+      toast("Pon al menos Enfoque o Clase.", "warn");
+      return;
+    }
+    if (!payload.sessions?.length){
+      toast("Agrega al menos una sesión (día/hora/salón).", "warn");
+      return;
+    }
+
+    // ✅ 1) No permitir duplicados dentro del mismo grupo
+    if (hasDuplicateInsideSameGroup(payload.sessions)){
+      toast("🚫 Este grupo tiene dos sesiones iguales (mismo día/hora/salón).", "danger");
+      return;
+    }
+
+    // ✅ 2) No permitir choques contra otros grupos (global)
+    const activeId = state.activeGroup?.id || null;
+    const occIndex = buildGlobalOccupancyIndex(state.allGroups || [], { excludeId: activeId });
+    const collision = findFirstCollision(payload.sessions, occIndex);
+
+    if (collision){
+      const s = collision.session;
+      const other = collision.hit?.label || "otro grupo";
+      toast(`🚫 Ocupado: ${s.day} ${s.time} en ${s.room} (ya lo usa: ${other})`, "danger");
+      return;
+    }
+
+    try{
+      utils.setInfo("Guardando…");
+
+      const colRef = ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION);
+
+      if (activeId){
+        const docRef = ctx.fs.doc(colRef, activeId);
+        await ctx.fs.setDoc(docRef, payload, { merge:true });
+        toast("Grupo actualizado ✅");
+      } else {
+        const docRef = ctx.fs.doc(colRef);
+        await ctx.fs.setDoc(docRef, payload, { merge:true });
+        toast("Grupo creado ✅");
+      }
+
+      modalClose();
+      state.__draftNew = null;
+      state.activeGroup = null;
+
+      renderCache.reset();
+      utils.setInfo("Listo.");
+    }catch(err){
+      console.error(err);
+
+      if (perms?.explainFirestoreErr) perms.explainFirestoreErr(err);
+      else toast("No se pudo guardar. Revisa Rules/Auth.", "danger");
+
+      utils.setInfo("Error guardando.");
+    }
+  }
+
+  async function deleteGroup(){
+    if (!perms.canEdit()){
+      perms.explainNoPerm("eliminar");
+      return;
+    }
+    const id = state.activeGroup?.id;
+    if (!id){
+      toast("Ese grupo no tiene ID. No hay nada que borrar.", "warn");
+      return;
+    }
+
+    const ok = confirm("¿Eliminar este grupo? Esto no se puede deshacer.");
+    if (!ok) return;
+
+    try{
+      utils.setInfo("Eliminando…");
+      const docRef = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
+      await ctx.fs.deleteDoc(docRef);
+      toast("Grupo eliminado ✅");
+      modalClose();
+      state.activeGroup = null;
+      renderCache.reset();
+      utils.setInfo("Listo.");
+    }catch(err){
+      console.error(err);
+      if (perms?.explainFirestoreErr) perms.explainFirestoreErr(err);
+      else toast("No se pudo eliminar. Firestore bloqueó la acción.", "danger");
+      utils.setInfo("Error eliminando.");
+    }
+  }
+
+  function wireModalOnce(){
+    if (!M.modal || M.modal.__wired) return;
+    M.modal.__wired = true;
+
+    M.btnClose?.addEventListener("click", modalClose);
+
+    document.addEventListener("keydown", (e) => {
+      if (!M.modal?.classList.contains("open")) return;
+      if (e.key === "Escape") modalClose();
+    });
+
+    M.btnAddSession?.addEventListener("click", () => {
+      if (!perms.canEdit()){
+        perms.explainNoPerm("editar");
+        return;
+      }
+      if (!M.sessionsWrap) return;
+      M.sessionsWrap.appendChild(makeSessionRow({
+        day: state.activeDay,
+        time: "15:00",
+        room: ROOMS[0]?.key || "Salón 1"
+      }));
+    });
+
+    M.btnSave?.addEventListener("click", saveGroup);
+    M.btnDelete?.addEventListener("click", deleteGroup);
   }
 
   /* =========================================================
-     RENDER GRID (ONE GRID)
+     GRID RENDER (ONE GRID) + DELEGATION
   ========================================================= */
   function buildTimeSlots(daySessions){
     const set = new Set();
     for (const s of daySessions){
       if (s.time) set.add(s.time);
     }
-    for (const t of BASE_SLOTS) set.add(t);
+    for (const t of (BASE_SLOTS || [])) set.add(t);
 
     const arr = Array.from(set);
     arr.sort((a,b) => utils.safeTimeToMinutes(a) - utils.safeTimeToMinutes(b));
@@ -557,10 +773,10 @@ export function initCore(ctx){
   function renderGrid(){
     if (!els.grid) return;
 
-    const daySessions = sessionsForDay(state.filteredGroups, state.activeDay);
+    const st = computeStats(state.filteredGroups, state.activeDay);
+    const daySessions = st.daySessions;
     const slots = buildTimeSlots(daySessions);
 
-    // time__room -> items[]
     const map = new Map();
     for (const s of daySessions){
       const key = `${s.time}__${s.room}`;
@@ -572,29 +788,26 @@ export function initCore(ctx){
     board.className = "sg sg-board";
     board.style.gridTemplateColumns = `140px repeat(${ROOMS.length}, minmax(140px, 1fr))`;
 
-    // Corner
     const corner = document.createElement("div");
     corner.className = "sg-cell sg-sticky-top sg-sticky-left sg-corner";
     corner.textContent = "Hora";
     board.appendChild(corner);
 
-    // Room headers
     for (const r of ROOMS){
       const h = document.createElement("div");
       h.className = "sg-cell sg-sticky-top sg-room";
       h.dataset.room = r.key;
       h.innerHTML = `
         <div class="room-title">${utils.htmlEscape(r.label)}</div>
-        <div class="room-note">${utils.htmlEscape(r.note)}</div>
+        <div class="room-note">${utils.htmlEscape(r.note || "")}</div>
       `;
       board.appendChild(h);
     }
 
-    // Rows
     for (let rowIdx=0; rowIdx<slots.length; rowIdx++){
       const time = slots[rowIdx];
       const zebra = (rowIdx % 2 === 0) ? "sg-row-even" : "sg-row-odd";
-      const peak = state.helpersOn && PEAK_HOURS.has(time);
+      const peak = !!(state.helpersOn && PEAK_HOURS?.has?.(time));
 
       const timeCell = document.createElement("div");
       timeCell.className = `sg-cell sg-sticky-left sg-time ${zebra}` + (peak ? " sg-peak" : "");
@@ -608,7 +821,7 @@ export function initCore(ctx){
         cell.dataset.room = r.key;
 
         const key = `${time}__${r.key}`;
-        const items = map.get(key) || [];
+        const items = (map.get(key) || []).slice();
 
         if (items.length > 1){
           cell.classList.add("sg-conflict");
@@ -617,13 +830,6 @@ export function initCore(ctx){
 
         if (!items.length){
           cell.innerHTML = `<div class="sg-empty" aria-hidden="true"></div>`;
-          cell.addEventListener("click", () => {
-            if (!perms.canEdit()){
-              perms.explainNoPerm("crear");
-              return;
-            }
-            openModalNewAt(state.activeDay, time, r.key);
-          });
         } else {
           items.sort((a,b) => {
             const ga = a.group, gb = b.group;
@@ -653,22 +859,21 @@ export function initCore(ctx){
             block.className = `sg-block ${tone} ${ageClass}`.trim();
             block.setAttribute("title", title);
 
+            block.dataset.action = "edit";
+            block.dataset.id = g?.id || "";
+
+            const secondary = [g?.clase, nivel].filter(Boolean).join(" · ");
+
             block.innerHTML = `
               <div class="sg-block-title">${utils.htmlEscape(enfoque || g?.clase || "Grupo")}</div>
               <div class="sg-block-meta">
                 <span>${utils.htmlEscape(edad || "")}</span>
+                ${secondary ? `<span class="sg-muted">· ${utils.htmlEscape(secondary)}</span>` : ""}
                 ${cupoTxt ? `<span class="sg-chip">${utils.htmlEscape(cupoTxt)}</span>` : ""}
               </div>
             `;
 
             applyBlockColors(block, g);
-
-            block.addEventListener("click", (e) => {
-              e.stopPropagation();
-              if (perms.canEdit()) openModalForGroup(g);
-              else toast(title || "Grupo");
-            });
-
             cell.appendChild(block);
           }
         }
@@ -680,920 +885,370 @@ export function initCore(ctx){
     els.grid.innerHTML = "";
     els.grid.appendChild(board);
 
-    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${daySessions.length} sesión(es)`);
+    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${st.sessionsCount} sesión(es)`);
+  }
+
+  function wireGridDelegationOnce(){
+    if (!els.grid || els.grid.__wired) return;
+    els.grid.__wired = true;
+
+    els.grid.addEventListener("click", (e) => {
+      const t = e.target;
+
+      const block = t?.closest?.(".sg-block[data-action='edit']");
+      if (block){
+        e.preventDefault();
+        e.stopPropagation();
+        const id = block.getAttribute("data-id") || "";
+        const g = (state.allGroups || []).find(x => x.id === id);
+        if (!g) return;
+        if (perms.canEdit()) openModalForGroup(g);
+        else toast(block.title || "Grupo");
+        return;
+      }
+
+      const cell = t?.closest?.(".sg-cell-slot");
+      if (cell){
+        const time = cell.getAttribute("data-time") || "";
+        const room = cell.getAttribute("data-room") || "";
+        if (!time || !room) return;
+
+        const hasBlock = !!cell.querySelector(".sg-block");
+        if (hasBlock) return; // main.js ya bloquea y avisa. aquí simplemente no crea.
+
+        if (!perms.canEdit()){
+          perms.explainNoPerm("crear");
+          return;
+        }
+        openModalNewAt(state.activeDay, time, room);
+      }
+    });
   }
 
   /* =========================================================
-     RENDER LIST
+     LIST RENDER
   ========================================================= */
   function renderList(){
     if (!els.list) return;
 
-    const daySessions = sessionsForDay(state.filteredGroups, state.activeDay);
+    const groups = state.filteredGroups || [];
+    const dayCanon = utils.canonDay(state.activeDay);
 
-    const items = daySessions.slice().sort((a,b) => {
-      const t = utils.safeTimeToMinutes(a.time) - utils.safeTimeToMinutes(b.time);
-      if (t !== 0) return t;
-      return (a.room || "").localeCompare(b.room || "", "es");
+    const items = [];
+    for (const g0 of groups){
+      const g = hydrateGroup(g0);
+      const sessions = g.__sessions || [];
+      for (const s of sessions){
+        if (s.day !== dayCanon) continue;
+        items.push({ g, s });
+      }
+    }
+
+    items.sort((a,b) => {
+      const ta = utils.safeTimeToMinutes(a.s.time);
+      const tb = utils.safeTimeToMinutes(b.s.time);
+      if (ta !== tb) return ta - tb;
+      const ra = String(a.s.room || "");
+      const rb = String(b.s.room || "");
+      const rcmp = ra.localeCompare(rb, "es");
+      if (rcmp !== 0) return rcmp;
+      const na = String(a.g.enfoque || a.g.clase || "");
+      const nb = String(b.g.enfoque || b.g.clase || "");
+      return na.localeCompare(nb, "es");
     });
 
     if (!items.length){
       els.list.innerHTML = `
-        <div class="list-empty">
-          No hay sesiones para <strong>${utils.htmlEscape(state.activeDay)}</strong> con los filtros actuales.
+        <div class="empty" style="padding:14px;color:rgba(107,114,128,.95);font-weight:900;">
+          No hay horarios para <b>${utils.htmlEscape(state.activeDay)}</b> con los filtros actuales.
         </div>
       `;
-      utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · 0 sesión(es)`);
       return;
     }
 
-    const byTime = new Map();
-    for (const it of items){
-      if (!byTime.has(it.time)) byTime.set(it.time, []);
-      byTime.get(it.time).push(it);
-    }
+    els.list.innerHTML = items.map(({g,s}) => {
+      const enfoque = (g.enfoque || g.clase || "Grupo").trim();
+      const edad = (g.edad || "").trim();
+      const clase = (g.clase || "").trim();
+      const nivel = (g.nivel || "").trim();
 
-    const times = Array.from(byTime.keys()).sort((a,b)=>utils.safeTimeToMinutes(a)-utils.safeTimeToMinutes(b));
-    const frag = document.createDocumentFragment();
+      const cupoMax = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
+      const cupoOcu = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
+      const cupoTxt = (cupoMax > 0) ? `${cupoOcu}/${cupoMax}` : "";
 
-    for (const time of times){
-      const wrap = document.createElement("div");
-      wrap.className = "list-time-block";
+      const title = [clase, edad, enfoque, nivel].filter(Boolean).join(" · ");
 
-      const head = document.createElement("div");
-      head.className = "list-time-head";
-      head.innerHTML = `<div class="list-time">${utils.htmlEscape(time)}</div>`;
-      wrap.appendChild(head);
-
-      const rows = document.createElement("div");
-      rows.className = "list-rows";
-
-      const its = byTime.get(time) || [];
-      its.sort((a,b) => (a.room || "").localeCompare(b.room || "", "es"));
-
-      for (const it of its){
-        const g = it.group;
-        const tone = g.__tone || toneClassForGroup(g);
-        const enfoque = (g?.enfoque ?? "").trim();
-        const nivel  = (g?.nivel ?? "").trim();
-        const edad   = (g?.edad ?? "").trim();
-        const clase  = (g?.clase ?? "").trim();
-
-        const cupoMax = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
-        const cupoOcu = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
-        const cupoTxt = (cupoMax > 0) ? `${cupoOcu}/${cupoMax}` : "";
-
-        const row = document.createElement("button");
-        row.type = "button";
-        row.className = `list-row ${tone}`;
-        row.title = [clase, edad, enfoque, nivel].filter(Boolean).join(" · ");
-
-        row.innerHTML = `
-          <div class="list-room">${utils.htmlEscape(it.room || "")}</div>
-          <div class="list-main">
-            <div class="list-title">${utils.htmlEscape(enfoque || clase || "Grupo")}</div>
-            <div class="list-meta">
-              <span>${utils.htmlEscape(clase || "")}</span>
-              ${edad ? `<span>· ${utils.htmlEscape(edad)}</span>` : ""}
-              ${nivel ? `<span>· ${utils.htmlEscape(nivel)}</span>` : ""}
-            </div>
+      return `
+        <article class="list-item" data-action="edit" data-id="${utils.htmlEscape(g.id || "")}" title="${utils.htmlEscape(title)}">
+          <div class="li-top">
+            <span class="li-time">${utils.htmlEscape(s.time)}</span>
+            <span class="li-room">${utils.htmlEscape(s.room)}</span>
           </div>
-          <div class="list-side">
-            ${cupoTxt ? `<span class="sg-chip">${utils.htmlEscape(cupoTxt)}</span>` : ""}
+          <div class="li-title">${utils.htmlEscape(enfoque)}</div>
+          <div class="li-meta">
+            ${edad ? `<span class="pill">${utils.htmlEscape(edad)}</span>` : ""}
+            ${clase ? `<span class="pill">${utils.htmlEscape(clase)}</span>` : ""}
+            ${nivel ? `<span class="pill ghost">${utils.htmlEscape(nivel)}</span>` : ""}
+            ${cupoTxt ? `<span class="pill">${utils.htmlEscape(cupoTxt)}</span>` : ""}
           </div>
-        `;
+        </article>
+      `;
+    }).join("");
 
-        row.addEventListener("click", () => {
-          if (perms.canEdit()) openModalForGroup(g);
-          else toast(row.title || "Grupo");
-        });
-
-        rows.appendChild(row);
-      }
-
-      wrap.appendChild(rows);
-      frag.appendChild(wrap);
+    if (!els.list.__wired){
+      els.list.__wired = true;
+      els.list.addEventListener("click", (e) => {
+        const item = e.target?.closest?.(".list-item[data-action='edit']");
+        if (!item) return;
+        const id = item.getAttribute("data-id") || "";
+        const g = (state.allGroups || []).find(x => x.id === id);
+        if (!g) return;
+        if (perms.canEdit()) openModalForGroup(g);
+        else toast(item.getAttribute("title") || "Grupo");
+      });
     }
-
-    els.list.innerHTML = "";
-    els.list.appendChild(frag);
-
-    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${daySessions.length} sesión(es)`);
   }
 
   /* =========================================================
-     ANALYTICS
+     ANALYTICS WRAP (si existe en HTML)
   ========================================================= */
-  function applyAnalyticsTabUI(tab){
-    state.activeAnaTab = tab || "dashboard";
-    safeSetLS(ctx.LS_ANA_TAB, state.activeAnaTab);
-
-    const setTab = (btn, isOn) => {
-      if (!btn) return;
-      btn.classList.toggle("ghost", !isOn);
-      btn.setAttribute("aria-selected", isOn ? "true" : "false");
-    };
-
-    setTab(els.tabAnaDashboard, state.activeAnaTab === "dashboard");
-    setTab(els.tabAnaEdad,      state.activeAnaTab === "edad");
-    setTab(els.tabAnaSalon,     state.activeAnaTab === "salon");
-    setTab(els.tabAnaArea,      state.activeAnaTab === "area");
-    setTab(els.tabAnaFranja,    state.activeAnaTab === "franja");
-  }
-
-  function setKPI(idEl, v, subEl, sub){
-    if (idEl) idEl.textContent = v;
-    if (subEl && sub != null) subEl.textContent = sub;
-  }
-
-  function renderPillsFromMap(map, { max=12, labelPrefix="" } = {}){
-    const entries = Array.from(map.entries()).sort((a,b)=>b[1]-a[1]).slice(0, max);
-    if (!entries.length) return `<div style="font-weight:800;color:rgba(107,114,128,.95);">Sin datos para mostrar.</div>`;
-    return `
-      <div style="display:flex;flex-wrap:wrap;gap:8px;">
-        ${entries.map(([k,v]) => `
-          <span class="stat-pill" style="display:inline-flex;gap:8px;align-items:center;">
-            <span class="dot-mini"></span>${utils.htmlEscape(labelPrefix ? `${labelPrefix}${k}` : k)}: ${v}
-          </span>
-        `).join("")}
-      </div>
-    `;
-  }
-
-  function computeAnalytics(groups, day){
-    const st = computeStats(groups, day);
-    const daySessions = sessionsForDay(groups, day);
-
-    const byAgeSessions  = new Map();
-    const byRoomSessions = new Map();
-    const byAreaSessions = new Map();
-    const byBandSessions = new Map();
-    const collisions = [];
-
-    const occMap = new Map(); // time__room -> items[]
-    for (const it of daySessions){
-      const g = it.group;
-      const age  = g.__ageKey || ageKey(g) || "Sin edad";
-      const room = it.room || "Sin salón";
-      const area = g.__tone || toneClassForGroup(g);
-      const band = bandForTime(it.time);
-
-      byAgeSessions.set(age,   (byAgeSessions.get(age)   || 0) + 1);
-      byRoomSessions.set(room, (byRoomSessions.get(room) || 0) + 1);
-      byAreaSessions.set(area, (byAreaSessions.get(area) || 0) + 1);
-      byBandSessions.set(band, (byBandSessions.get(band) || 0) + 1);
-
-      const k = `${it.time}__${room}`;
-      if (!occMap.has(k)) occMap.set(k, []);
-      occMap.get(k).push(it);
-    }
-
-    for (const [k, arr] of occMap.entries()){
-      if (arr.length > 1){
-        const [time, room] = k.split("__");
-        collisions.push({ time, room, count: arr.length, items: arr });
-      }
-    }
-    collisions.sort((a,b)=> b.count - a.count || utils.safeTimeToMinutes(a.time)-utils.safeTimeToMinutes(b.time));
-
-    const ocu = st.cupoMaxSum > 0 ? (st.cupoOcuSum / Math.max(1, st.cupoMaxSum)) : null;
-
-    return { st, daySessions, byAgeSessions, byRoomSessions, byAreaSessions, byBandSessions, collisions, ocu };
-  }
-
-  function renderAnalytics(mode){
+  function renderAnalyticsIfPresent(){
     if (!els.analyticsWrap) return;
 
-    const dayCanon = state.activeDay;
-    const A = computeAnalytics(state.filteredGroups, dayCanon);
+    const st = computeStats(state.filteredGroups, state.activeDay);
 
-    if (els.analyticsTitle){
-      els.analyticsTitle.textContent =
-        mode === "dashboard" ? "Dashboard" :
-        mode === "occupancy" ? "Ocupación" :
-        mode === "conflicts" ? "Conflictos" :
-        "Propuestas";
-    }
-    if (els.analyticsSubtitle){
+    if (els.analyticsTitle) els.analyticsTitle.textContent = "Resumen";
+    if (els.analyticsSubtitle) {
       els.analyticsSubtitle.textContent =
-        mode === "dashboard" ? "KPIs para operar sin adivinar." :
-        mode === "occupancy" ? "Distribución por edades, salones, áreas y franjas." :
-        mode === "conflicts" ? "Celdas con 2+ sesiones (choques) y dónde ocurren." :
-        "Huecos sugeridos (básico) para programar sin estrellarse.";
+        `Día: ${state.activeDay} · Sesiones: ${st.sessionsCount} · Choques: ${st.conflictsExtras}`;
     }
 
-    setKPI(els.kpiGroups, String(A.st.groupsCount), els.kpiGroupsSub, "Activos según filtros");
-    setKPI(els.kpiSessions, String(A.st.sessionsCount), els.kpiSessionsSub, `Sesiones en ${dayCanon}`);
-
-    const occText = (A.ocu == null) ? "—" : `${utils.percent(A.ocu)}`;
-    const occSub  = (A.ocu == null) ? "Sin cupos en datos" : `${A.st.cupoOcuSum}/${A.st.cupoMaxSum} cupos (en ${dayCanon})`;
-    setKPI(els.kpiOccupancy, occText, els.kpiOccupancySub, occSub);
-
-    setKPI(els.kpiCollisions, String(A.st.collisionsCells), els.kpiCollisionsSub, "Celdas con 2+ sesiones");
-
-    // Reset containers
-    const top    = els.anaTopContent;
-    const bottom = els.anaBottomContent;
-    const alerts = els.anaAlertsContent;
-
-    if (top) top.innerHTML = "";
-    if (bottom) bottom.innerHTML = "";
-    if (alerts) alerts.innerHTML = "";
-
-    // Alerts
-    if (alerts){
-      const notes = A.st.notes.slice(0, 6);
-      alerts.innerHTML = notes.length
-        ? `<div style="display:flex;flex-direction:column;gap:8px;">
-             ${notes.map(n => `<div class="alert-row">${utils.htmlEscape(n)}</div>`).join("")}
-           </div>`
-        : `<div style="font-weight:800;color:rgba(107,114,128,.95);">Sin alertas por ahora. Milagro.</div>`;
-    }
-
-    const renderTabContent = (tab) => {
-      if (!top || !bottom) return;
-
-      if (tab === "edad"){
-        els.anaTopTitle && (els.anaTopTitle.textContent = "Sesiones por edad");
-        top.innerHTML = renderPillsFromMap(A.byAgeSessions, { max: 24 });
-
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Grupos por edad");
-        const byAgeGroups = new Map();
-        for (const g of state.filteredGroups){
-          const k = g.__ageKey || ageKey(g) || "Sin edad";
-          byAgeGroups.set(k, (byAgeGroups.get(k) || 0) + 1);
-        }
-        bottom.innerHTML = renderPillsFromMap(byAgeGroups, { max: 24 });
-        return;
-      }
-
-      if (tab === "salon"){
-        els.anaTopTitle && (els.anaTopTitle.textContent = "Sesiones por salón");
-        top.innerHTML = renderPillsFromMap(A.byRoomSessions, { max: 24 });
-
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Salones usados (top)");
-        bottom.innerHTML = `
-          <div style="font-weight:900;color:rgba(17,24,39,.88);">
-            Salones usados: ${A.st.roomsUsedCount} / ${ROOMS.length}
-          </div>
-        `;
-        return;
-      }
-
-      if (tab === "area"){
-        els.anaTopTitle && (els.anaTopTitle.textContent = "Sesiones por área");
-        const labels = new Map();
-        for (const [k,v] of A.byAreaSessions.entries()){
-          const name =
-            k === "music" ? "Música" :
-            k === "dance" ? "Danza" :
-            k === "theater" ? "Teatro" :
-            k === "arts" ? "Artes" : k;
-          labels.set(name, v);
-        }
-        top.innerHTML = renderPillsFromMap(labels, { max: 12 });
-
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Grupos por área");
-        bottom.innerHTML = renderPillsFromMap(new Map([
-          ["Música", A.st.byArea.music],
-          ["Danza",  A.st.byArea.dance],
-          ["Teatro", A.st.byArea.theater],
-          ["Artes",  A.st.byArea.arts],
-        ]), { max: 12 });
-        return;
-      }
-
-      if (tab === "franja"){
-        els.anaTopTitle && (els.anaTopTitle.textContent = "Sesiones por franja horaria");
-        top.innerHTML = renderPillsFromMap(A.byBandSessions, { max: 12 });
-
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Hora pico");
-        bottom.innerHTML = `
-          <div class="stat-pill"><span class="dot-mini"></span>Sesiones hora pico: ${A.st.peakSessions}</div>
-          <div style="height:8px;"></div>
-          <div style="font-weight:800;color:rgba(107,114,128,.95);">
-            Hora pico definida: ${Array.from(PEAK_HOURS).join(", ")}
-          </div>
-        `;
-        return;
-      }
-
-      // default: dashboard
-      els.anaTopTitle && (els.anaTopTitle.textContent = "Resumen visual");
-      top.innerHTML = `
+    if (els.anaTopTitle) els.anaTopTitle.textContent = "Operación";
+    if (els.anaTopContent){
+      const ocu = (st.cupoMaxSum > 0) ? utils.percent(st.cupoOcuSum, st.cupoMaxSum) : 0;
+      const ocuTxt = (st.cupoMaxSum > 0) ? `${ocu}% (${st.cupoOcuSum}/${st.cupoMaxSum})` : "—";
+      els.anaTopContent.innerHTML = `
         <div style="display:flex;flex-wrap:wrap;gap:10px;">
-          <span class="stat-pill"><span class="dot-mini"></span>Grupos: ${A.st.groupsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Sesiones (${dayCanon}): ${A.st.sessionsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Salones usados: ${A.st.roomsUsedCount}/${ROOMS.length}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Choques (celdas): ${A.st.collisionsCells}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Choques extra: ${A.st.conflictsExtras}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Ocupación: ${occText}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Grupos: ${st.groupsCount}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Sesiones: ${st.sessionsCount}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Salones usados: ${st.roomsUsedCount}/${ROOMS.length}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Choques: ${st.conflictsExtras}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Ocupación: ${ocuTxt}</span>
         </div>
       `;
+    }
 
-      els.anaBottomTitle && (els.anaBottomTitle.textContent = "Top salones + top edades");
-      const topRooms = Array.from(A.byRoomSessions.entries()).sort((a,b)=>b[1]-a[1]).slice(0, 5);
-      const topAges  = Array.from(A.byAgeSessions.entries()).sort((a,b)=>b[1]-a[1]).slice(0, 6);
-      bottom.innerHTML = `
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div class="stats-box">
-            <h4>Top salones</h4>
-            ${renderPillsFromMap(new Map(topRooms), { max: 10 })}
-          </div>
-          <div class="stats-box">
-            <h4>Top edades (sesiones)</h4>
-            ${renderPillsFromMap(new Map(topAges), { max: 10 })}
-          </div>
+    if (els.anaBottomTitle) els.anaBottomTitle.textContent = "Nota";
+    if (els.anaBottomContent){
+      const notes = [];
+      if (st.conflictsExtras > 0) notes.push("Hay choques: revisa salón/hora duplicados.");
+      if (st.roomsUsedCount === ROOMS.length) notes.push("Día usando todos los salones: está apretado.");
+      if (!notes.length) notes.push("Todo normal por ahora.");
+      els.anaBottomContent.innerHTML = `
+        <div style="color:rgba(107,114,128,.95);font-weight:800;">
+          ${notes.map(n => `<div class="alert-row">${utils.htmlEscape(n)}</div>`).join("")}
         </div>
       `;
-    };
-
-    // Conflicts view
-    if (mode === "conflicts"){
-      applyAnalyticsTabUI("dashboard");
-      els.anaTopTitle && (els.anaTopTitle.textContent = "Celdas con choques");
-
-      if (top){
-        top.innerHTML = A.collisions.length
-          ? `<div style="display:flex;flex-direction:column;gap:8px;">
-              ${A.collisions.slice(0, 30).map(c => `
-                <div class="alert-row" style="border-color:rgba(239,68,68,.25);background:rgba(239,68,68,.08);color:rgba(127,29,29,.95);">
-                  <strong>${utils.htmlEscape(c.time)} · ${utils.htmlEscape(c.room)}</strong> · ${c.count} sesiones
-                </div>
-              `).join("")}
-             </div>`
-          : `<div style="font-weight:800;color:rgba(107,114,128,.95);">
-              No hay choques para ${utils.htmlEscape(dayCanon)} con estos filtros.
-             </div>`;
-      }
-
-      if (bottom){
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Detalle (primer choque)");
-        const first = A.collisions[0];
-        bottom.innerHTML = first ? `
-          <div class="stats-box">
-            <h4>${utils.htmlEscape(first.time)} · ${utils.htmlEscape(first.room)}</h4>
-            <div style="display:flex;flex-direction:column;gap:8px;">
-              ${first.items.map(it => {
-                const g = it.group;
-                return `<div class="stat-pill" style="justify-content:space-between;">
-                          <span>${utils.htmlEscape(g.enfoque || g.clase || "Grupo")}</span>
-                          <span style="opacity:.85">${utils.htmlEscape(g.edad || "")}</span>
-                        </div>`;
-              }).join("")}
-            </div>
-          </div>
-        ` : `<div style="font-weight:800;color:rgba(107,114,128,.95);">Sin detalle.</div>`;
-      }
-
-      utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${dayCanon} · choques: ${A.st.conflictsExtras}`);
-      return;
     }
-
-    // Proposals view
-    if (mode === "proposals"){
-      applyAnalyticsTabUI("dashboard");
-      els.anaTopTitle && (els.anaTopTitle.textContent = "Huecos sugeridos");
-
-      const daySessions = A.daySessions;
-      const occ = new Set(daySessions.map(s => `${s.time}__${s.room}`));
-
-      const slots = Array.from(new Set([...BASE_SLOTS, ...daySessions.map(s=>s.time)]))
-        .sort((a,b)=>utils.safeTimeToMinutes(a)-utils.safeTimeToMinutes(b));
-
-      const preferred = slots.some(t => PEAK_HOURS.has(t))
-        ? slots.filter(t => PEAK_HOURS.has(t))
-        : slots.slice(-4);
-
-      const suggestions = [];
-      for (const t of preferred){
-        for (const r of ROOMS){
-          const k = `${t}__${r.key}`;
-          if (!occ.has(k)) suggestions.push({ time:t, room:r.key });
-        }
-      }
-
-      if (top){
-        top.innerHTML = suggestions.length
-          ? `<div style="display:flex;flex-wrap:wrap;gap:8px;">
-              ${suggestions.slice(0, 40).map(s => `
-                <span class="stat-pill"><span class="dot-mini"></span>${utils.htmlEscape(s.time)} · ${utils.htmlEscape(s.room)}</span>
-              `).join("")}
-             </div>`
-          : `<div style="font-weight:800;color:rgba(107,114,128,.95);">No hay huecos sugeridos (o todo está lleno). Bien.</div>`;
-      }
-
-      if (bottom){
-        els.anaBottomTitle && (els.anaBottomTitle.textContent = "Idea rápida");
-        bottom.innerHTML = `
-          <div class="stats-box">
-            <h4>Cómo usar esto</h4>
-            <div style="font-weight:800;color:rgba(107,114,128,.95);line-height:1.35;">
-              Estos huecos son “básicos”: celdas vacías en hora pico (o últimas franjas).
-              Úsalos para abrir grupos nuevos sin estrellarte con choques.
-            </div>
-          </div>
-        `;
-      }
-
-      utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${dayCanon} · propuestas: ${Math.min(40, suggestions.length)}`);
-      return;
-    }
-
-    // Occupancy/dashboard (tabbed)
-    if (!["dashboard","edad","salon","area","franja"].includes(state.activeAnaTab)) applyAnalyticsTabUI("dashboard");
-    renderTabContent(state.activeAnaTab);
-
-    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${dayCanon} · sesiones: ${A.st.sessionsCount}`);
   }
 
   /* =========================================================
-     APPLY FILTERS + RENDER
+     APPLY FILTERS + RENDER (central)
   ========================================================= */
-  function applyFiltersAndRender(){
+  function syncViewContainers(){
+    if (!els.grid || !els.list) return;
+
+    const isList = (state.activeView === "list");
+    els.list.classList.toggle("hidden", !isList);
+    els.grid.classList.toggle("hidden", isList);
+  }
+
+  function showOnly(view){
+    state.activeView = (view === "list") ? "list" : "grid";
+    syncViewContainers();
+  }
+
+  function applyFiltersAndRender({ force=false } = {}){
     applyFilters();
 
-    renderDayTabs();
+    const k = computeKey();
+    if (!force && renderCache.key === k) return;
+    renderCache.key = k;
+
+    syncViewContainers();
+
+    if (state.activeView === "list"){
+      renderList();
+    } else {
+      renderGrid();
+    }
+
     renderStats();
-
-    if (state.activeView === "grid") renderGrid();
-    else if (state.activeView === "list") renderList();
-    else renderAnalytics(state.activeView);
-
-    applyColorModeUI();
-    applyHelpersUI();
+    renderAnalyticsIfPresent();
   }
 
   /* =========================================================
-     MODAL (ADMIN)
+     EXPORT / IMPORT JSON (backup/restore)
   ========================================================= */
-  function openModal(){
-    state._lastFocus = document.activeElement;
-
-    els.modal?.classList.remove("hidden");
-    els.modal?.setAttribute("aria-hidden","false");
-    document.body.style.overflow = "hidden";
-
-    setTimeout(() => {
-      (els.mEnfoque || els.mClase || els.btnSave)?.focus?.();
-    }, 0);
+  function downloadJSON(filename, obj){
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type:"application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
-  function closeModal(){
-    els.modal?.classList.add("hidden");
-    els.modal?.setAttribute("aria-hidden","true");
-    document.body.style.overflow = "";
-    state.editingId = null;
-    state.editingDraft = null;
-    if (els.sessionsList) els.sessionsList.innerHTML = "";
-
-    setTimeout(() => state._lastFocus?.focus?.(), 0);
-  }
-
-  function setModalTitle(t){
-    if (els.modalTitle) els.modalTitle.textContent = t;
-  }
-
-  function writeDraftToModal(d){
-    if (!d) return;
-    if (els.mClase)   els.mClase.value = d.clase ?? "Música";
-    if (els.mEdad)    els.mEdad.value = d.edad ?? "Musikids";
-    if (els.mEnfoque) els.mEnfoque.value = d.enfoque ?? "";
-    if (els.mNivel)   els.mNivel.value = d.nivel ?? "";
-    if (els.mCupoMax) els.mCupoMax.value = String(utils.clampInt(d.cupoMax ?? 0, 0));
-    if (els.mCupoOcu) els.mCupoOcu.value = String(utils.clampInt(d.cupoOcupado ?? 0, 0));
-    if (els.mActivo)  els.mActivo.checked = (d.activo !== false);
-  }
-
-  function readDraftFromModal(){
-    const d = state.editingDraft || {};
-    d.clase = (els.mClase?.value ?? "").trim();
-    d.edad  = (els.mEdad?.value ?? "").trim();
-    d.enfoque = (els.mEnfoque?.value ?? "").trim();
-    d.nivel   = (els.mNivel?.value ?? "").trim();
-    d.cupoMax = utils.clampInt(els.mCupoMax?.value ?? 0, 0);
-    d.cupoOcupado = utils.clampInt(els.mCupoOcu?.value ?? 0, 0);
-    d.activo = !!els.mActivo?.checked;
-    return d;
-  }
-
-  function ensureDraftSessions(){
-    if (!state.editingDraft) state.editingDraft = {};
-    state.editingDraft.sessions = normalizeSessions(state.editingDraft.sessions);
-  }
-
-  // Delegación: un solo listener para cambios/elim
-  function wireSessionsListDelegationOnce(){
-    if (!els.sessionsList || els.sessionsList.__wired) return;
-    els.sessionsList.__wired = true;
-
-    els.sessionsList.addEventListener("change", (e) => {
-      const target = e.target;
-      if (!target) return;
-
-      const k = target.getAttribute("data-k");
-      const i = utils.clampInt(target.getAttribute("data-i"), 0);
-      if (!k) return;
-
-      ensureDraftSessions();
-      if (!state.editingDraft.sessions[i]) return;
-
-      const v = (target.value ?? "").trim();
-
-      if (k === "time") state.editingDraft.sessions[i][k] = utils.normalizeHHMM(v);
-      else if (k === "day") state.editingDraft.sessions[i][k] = utils.canonDay(v);
-      else if (k === "room") state.editingDraft.sessions[i][k] = utils.canonRoom(v);
-      else state.editingDraft.sessions[i][k] = v;
-
-      state.editingDraft.sessions = normalizeSessions(state.editingDraft.sessions);
-      renderSessionsList();
-    });
-
-    els.sessionsList.addEventListener("click", (e) => {
-      const btn = e.target?.closest?.("[data-del]");
-      if (!btn) return;
-
-      const i = utils.clampInt(btn.getAttribute("data-del"), 0);
-      ensureDraftSessions();
-      state.editingDraft.sessions.splice(i, 1);
-      renderSessionsList();
-    });
-  }
-
-  function renderSessionsList(){
-    if (!els.sessionsList) return;
-    wireSessionsListDelegationOnce();
-
-    ensureDraftSessions();
-    const sessions = state.editingDraft.sessions;
-
-    els.sessionsList.innerHTML = "";
-
-    const frag = document.createDocumentFragment();
-
-    sessions.forEach((s, idx) => {
-      const row = document.createElement("div");
-      row.className = "session-row";
-
-      row.innerHTML = `
-        <div class="field">
-          <label>Día</label>
-          <select data-k="day" data-i="${idx}">
-            ${DAYS.map(x => `<option ${x===s.day?"selected":""}>${utils.htmlEscape(x)}</option>`).join("")}
-          </select>
-        </div>
-
-        <div class="field">
-          <label>Hora</label>
-          <input data-k="time" data-i="${idx}" value="${utils.htmlEscape(s.time)}" placeholder="16:00" />
-        </div>
-
-        <div class="field">
-          <label>Salón</label>
-          <select data-k="room" data-i="${idx}">
-            ${ROOMS.map(r => `<option ${r.key===s.room?"selected":""}>${utils.htmlEscape(r.key)}</option>`).join("")}
-          </select>
-        </div>
-
-        <button class="icon-btn danger" type="button" data-del="${idx}" aria-label="Quitar">✕</button>
-      `;
-
-      frag.appendChild(row);
-    });
-
-    els.sessionsList.appendChild(frag);
-  }
-
-  function openModalForGroup(g){
-    state.editingId = g?.id ?? null;
-    state.editingDraft = {
-      clase: g?.clase ?? "Música",
-      edad: g?.edad ?? "Musikids",
-      enfoque: g?.enfoque ?? "",
-      nivel: g?.nivel ?? "",
-      cupoMax: g?.cupoMax ?? g?.cupo_max ?? g?.__cupoMax ?? 0,
-      cupoOcupado: g?.cupoOcupado ?? g?.cupo_ocupado ?? g?.__cupoOcu ?? 0,
-      activo: (g?.activo !== false),
-      sessions: normalizeSessions(g?.sessions),
+  function exportBackup(){
+    const payload = {
+      kind: "musicala.horarios.backup",
+      version: CORE_VERSION,
+      exportedAt: new Date().toISOString(),
+      groups: (state.allGroups || []).map(g => {
+        const out = { ...g };
+        delete out.__sessions;
+        delete out.__tone;
+        delete out.__ageKey;
+        delete out.__search;
+        delete out.__cupoMax;
+        delete out.__cupoOcu;
+        return out;
+      }),
     };
 
-    setModalTitle(state.editingId ? "Editar grupo" : "Nuevo grupo");
-    writeDraftToModal(state.editingDraft);
-    renderSessionsList();
-    openModal();
+    downloadJSON(`horarios_backup_${new Date().toISOString().slice(0,10)}.json`, payload);
+    toast("Backup descargado ✅");
   }
 
-  function openModalNew(){
-    openModalForGroup({ id:null });
-    state.editingId = null;
+  async function upsertGroupById(id, data){
+    const clean = { ...(data || {}) };
+
+    delete clean.__sessions;
+    delete clean.__tone;
+    delete clean.__ageKey;
+    delete clean.__search;
+    delete clean.__cupoMax;
+    delete clean.__cupoOcu;
+
+    const docRef = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
+    await ctx.fs.setDoc(docRef, clean, { merge:true });
   }
 
-  function openModalNewAt(day, time, roomKey){
-    openModalNew();
-    ensureDraftSessions();
-    state.editingDraft.sessions.push({
-      day: utils.canonDay(day),
-      time: utils.normalizeHHMM(time),
-      room: utils.canonRoom(roomKey)
-    });
-    state.editingDraft.sessions = normalizeSessions(state.editingDraft.sessions);
-    renderSessionsList();
-  }
-
-  function addSession(){
-    ensureDraftSessions();
-    state.editingDraft.sessions.push({
-      day: utils.canonDay(state.activeDay),
-      time: "16:00",
-      room: ROOMS[0].key
-    });
-    state.editingDraft.sessions = normalizeSessions(state.editingDraft.sessions);
-    renderSessionsList();
-  }
-
-  /* =========================================================
-     SAVE / DELETE
-  ========================================================= */
-  function validateDraftBeforeSave(d){
-    if (!d.clase) d.clase = "Música";
-    if (!d.edad)  d.edad  = "Musikids";
-    d.sessions = normalizeSessions(d.sessions);
-
-    if (!d.sessions.length){
-      toast("Agrega al menos una sesión (día/hora/salón).");
-      return false;
-    }
-    return true;
-  }
-
-  async function saveGroup(){
-    if (!perms.canEdit()){
-      perms.explainNoPerm("guardar");
-      return;
-    }
-
-    try{
-      const d = readDraftFromModal();
-      d.sessions = normalizeSessions(state.editingDraft?.sessions);
-      d.updatedAt = ctx.fs.serverTimestamp();
-
-      if (!validateDraftBeforeSave(d)) return;
-
-      if (!state.editingId){
-        d.createdAt = ctx.fs.serverTimestamp();
-        await ctx.fs.addDoc(ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION), d);
-        toast("Grupo creado ✅");
-      } else {
-        await ctx.fs.updateDoc(ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, state.editingId), d);
-        toast("Grupo guardado ✅");
-      }
-
-      closeModal();
-    }catch(err){
-      console.error(err);
-      perms.explainFirestoreErr(err);
-    }
-  }
-
-  async function deleteGroup(){
-    if (!perms.canEdit()){
-      perms.explainNoPerm("eliminar");
-      return;
-    }
-    if (!state.editingId){
-      toast("Este grupo no existe aún.");
-      return;
-    }
-    const ok = confirm("¿Eliminar este grupo? Esto no se puede deshacer.");
-    if (!ok) return;
-
-    try{
-      await ctx.fs.deleteDoc(ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, state.editingId));
-      toast("Grupo eliminado ✅");
-      closeModal();
-    }catch(err){
-      console.error(err);
-      perms.explainFirestoreErr(err);
-    }
-  }
-
-  /* =========================================================
-     EXPORT JSON (Backup)
-     - Exporta ALL GROUPS (no solo filtrados)
-     - Limpia campos internos (__*)
-  ========================================================= */
-  function stripInternalFields(g){
-    const out = {};
-    for (const [k, v] of Object.entries(g || {})){
-      if (k.startsWith("__")) continue;
-      out[k] = v;
-    }
-    out.sessions = normalizeSessions(out.sessions);
-    return out;
-  }
-
-  async function exportJSON(){
-    try{
-      const groups = (state.allGroups || []).map(stripInternalFields);
-
-      const payload = {
-        app: "Horarios Grupales · Musicala",
-        core: CORE_VERSION,
-        exportedAt: new Date().toISOString(),
-        counts: {
-          groups: groups.length,
-          filtered: (state.filteredGroups || []).length,
-        },
-        active: {
-          day: state.activeDay,
-          view: state.activeView,
-          colorMode: state.colorMode,
-          helpersOn: !!state.helpersOn
-        },
-        filters: {
-          search: (els.search?.value ?? ""),
-          clase:  (els.fClase?.value ?? ""),
-          edad:   (els.fEdad?.value ?? ""),
-          dia:    (els.fDia?.value ?? "")
-        },
-        groups
-      };
-
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `horarios_backup_${new Date().toISOString().slice(0,10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      URL.revokeObjectURL(url);
-      toast("Exportación lista ✅");
-    }catch(err){
-      console.error(err);
-      toast("No se pudo exportar 😵");
-    }
-  }
-
-  /* =========================================================
-     IMPORT JSON (Restore)
-     - Acepta payload con {groups:[...]} o array directo
-     - Upsert por ID (setDoc) si viene g.id
-     - Si no trae id: crea nuevo (addDoc)
-     - En batchs pequeños para no reventar Firestore
-  ========================================================= */
-  async function importJSONFile(file){
+  async function importBackupFromFile(eOrFile){
     if (!perms.canEdit()){
       perms.explainNoPerm("importar");
       return;
     }
-    if (!file){
-      toast("No llegó archivo para importar.");
-      return;
-    }
+
+    const file = eOrFile?.target?.files?.[0] || eOrFile;
+    if (!file) return;
 
     try{
-      const text = await file.text();
-      let data;
-      try{
-        data = JSON.parse(text);
-      }catch(_){
-        toast("Ese archivo no parece JSON válido.");
+      const txt = await file.text();
+      const json = JSON.parse(txt);
+
+      const groups = Array.isArray(json?.groups) ? json.groups : null;
+
+      if (!groups){
+        toast("Ese JSON no tiene .groups (backup inválido).", "warn");
         return;
       }
 
-      let groups = [];
-      if (Array.isArray(data)) groups = data;
-      else if (isObj(data) && Array.isArray(data.groups)) groups = data.groups;
-      else {
-        toast("JSON sin 'groups'. No sé qué querías que hiciera con eso.");
-        return;
-      }
-
-      // Sanitiza: quitar __*, normalizar sessions, defaults
-      const cleaned = groups
-        .filter(isObj)
-        .map(stripInternalFields)
-        .map(g => ({
-          ...g,
-          clase: (g.clase ?? "Música").toString().trim() || "Música",
-          edad:  (g.edad  ?? "Musikids").toString().trim() || "Musikids",
-          enfoque: (g.enfoque ?? "").toString().trim(),
-          nivel:   (g.nivel ?? "").toString().trim(),
-          cupoMax: utils.clampInt(g.cupoMax ?? g.cupo_max ?? 0, 0),
-          cupoOcupado: utils.clampInt(g.cupoOcupado ?? g.cupo_ocupado ?? 0, 0),
-          activo: (g.activo !== false),
-          sessions: normalizeSessions(g.sessions),
-        }))
-        .filter(g => Array.isArray(g.sessions) && g.sessions.length);
-
-      if (!cleaned.length){
-        toast("No hay grupos válidos para importar (¿sin sesiones?).");
-        return;
-      }
-
-      const ok = confirm(
-        `Vas a importar ${cleaned.length} grupo(s).\n` +
-        `Esto puede sobrescribir IDs existentes si coinciden.\n\n` +
-        `¿Continuar?`
-      );
+      const ok = confirm(`Se van a importar ${groups.length} grupo(s) (upsert por ID). ¿Continuar?`);
       if (!ok) return;
 
-      // Batch seguro: 35 por tanda para no saturar (y que UI no muera)
-      const CHUNK = 35;
-      let upserts = 0;
-      let creates = 0;
+      utils.setInfo("Importando…");
 
-      utils.setInfo(`Importando ${cleaned.length}…`);
-
-      for (let i=0; i<cleaned.length; i+=CHUNK){
-        const chunk = cleaned.slice(i, i+CHUNK);
-
-        // Importante: no guardar timestamps como strings raras.
-        // Si existe createdAt/updatedAt en el JSON, lo dejamos como está (puede ser string).
-        // Preferimos setear updatedAt a serverTimestamp para consistencia.
-        const promises = chunk.map(async (g) => {
-          const payload = {
-            ...g,
-            updatedAt: ctx.fs.serverTimestamp(),
-          };
-
-          // Si viene id, upsert por id
-          if (g.id){
-            const id = g.id;
-            const ref = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
-            await ctx.fs.setDoc(ref, payload, { merge: true });
-            upserts++;
-            return;
-          }
-
-          // Si no viene id: crear
-          payload.createdAt = ctx.fs.serverTimestamp();
-          await ctx.fs.addDoc(ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION), payload);
-          creates++;
-        });
-
-        await Promise.all(promises);
+      let done = 0;
+      for (const g of groups){
+        const id = (g?.id ?? "").toString().trim();
+        if (!id) continue;
+        await upsertGroupById(id, g);
+        done++;
       }
 
-      toast(`Importado ✅ Upsert: ${upserts} · Nuevos: ${creates}`);
-      utils.setInfo(`Importado ✅ (${cleaned.length})`);
-
-      // Refresca vista (snapshot debería actualizar solo, pero por UX)
-      applyFiltersAndRender();
+      toast(`Importados ${done} grupo(s) ✅`);
+      utils.setInfo("Importación lista.");
+      renderCache.reset();
     }catch(err){
       console.error(err);
-      perms.explainFirestoreErr?.(err);
-      toast("Falló la importación. Mira consola.");
+      toast("No pude leer ese JSON. O está roto o no era un backup.", "danger");
+      utils.setInfo("Error importando.");
+    }finally{
+      if (eOrFile?.target && eOrFile.target.value != null){
+        eOrFile.target.value = "";
+      }
+    }
+  }
+
+  function wireBackupOnce(){
+    if (els.btnExport && !els.btnExport.__wired){
+      els.btnExport.__wired = true;
+      els.btnExport.addEventListener("click", exportBackup);
+    }
+
+    if (els.btnImport && !els.btnImport.__wired){
+      els.btnImport.__wired = true;
+      els.btnImport.addEventListener("click", () => els.fileImport?.click?.());
+    }
+
+    if (els.fileImport && !els.fileImport.__wired){
+      els.fileImport.__wired = true;
+      els.fileImport.addEventListener("change", importBackupFromFile);
     }
   }
 
   /* =========================================================
-     PUBLIC API
+     UI WIRING (compat)
+  ========================================================= */
+  function syncDayUI(newDay){
+    const d = utils.canonDay(newDay);
+    if (!DAYS.includes(d)) return;
+    if (state.activeDay === d) return;
+
+    state.activeDay = d;
+    renderCache.reset();
+    applyFiltersAndRender({ force:true });
+    utils.writeFiltersToURL?.();
+  }
+
+  /* =========================================================
+     INIT
+  ========================================================= */
+  function init(){
+    const d = utils.canonDay(state.activeDay || DAYS[0]);
+    state.activeDay = DAYS.includes(d) ? d : DAYS[0];
+
+    state.activeView = (state.activeView === "list") ? "list" : "grid";
+
+    document.body.classList.toggle("color-mode-area", state.colorMode !== "age");
+    document.body.classList.toggle("color-mode-age",  state.colorMode === "age");
+    document.body.classList.toggle("helpers-off", !state.helpersOn);
+
+    wireGridDelegationOnce();
+    wireModalOnce();
+    wireBackupOnce();
+
+    applyFiltersAndRender({ force:true });
+    subscribeGroupsOnce();
+  }
+
+  init();
+
+  /* =========================================================
+     PUBLIC API (for main.js)
   ========================================================= */
   return {
-    // init helpers
-    initViewFromStorage,
-    initUIModes,
-
-    // firestore
-    subscribeGroupsOnce,
-
-    // view & renders
-    setView,
-    showOnly,
-    renderGrid,
-    renderList,
-    renderAnalytics,
-
-    // day UI
-    renderDayTabs,
+    version: CORE_VERSION,
+    reload,
+    onAuthChanged,
     syncDayUI,
-
-    // analytics tabs
-    applyAnalyticsTabUI,
-
-    // ui modes
-    applyColorModeUI,
-    applyHelpersUI,
-
-    // filter+render
     applyFiltersAndRender,
-
-    // modal/crud
-    openModalNew,
-    openModalForGroup,
-    openModalNewAt,
-    openModal,
-    closeModal,
-    addSession,
-    saveGroup,
-    deleteGroup,
-
-    // backup
-    exportJSON,
-    importJSONFile,
+    showOnly,
+    exportBackup,
+    importBackupFromFile,
   };
 }
