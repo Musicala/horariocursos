@@ -1,24 +1,21 @@
-// main.js
-// ------------------------------------------------------------
-// Horarios Grupales · Musicala (Static / GitHub Pages friendly)
-// Split PRO (balanced): main.js + horarios.core.js
-// - main.js: CONFIG + DOM + UTILS + AUTH/ADMIN + URL + EVENTS + INIT
-// - core: Firestore + hydration + filters + views + renders + analytics + modal + CRUD + (Export/Import JSON)
-// ------------------------------------------------------------
+// main.js — Horarios Grupales · Musicala (LIGHT) — Grid Edition (PC-first)
+// -----------------------------------------------------------------------------
+// ✅ Sin login / sin admin / sin roles / sin menú móvil
+// ✅ Mantiene Firestore (firebase.js) y Export/Import JSON (backup)
+// ✅ UI: rail izquierda + tablero grid + stats debajo
+// ✅ Pantalla completa (UI + intento nativo cross-browser)
+// ✅ Helpers SIEMPRE activos (hora pico siempre visible se fuerza en core)
+// ✅ Vista: Tablero / Lista (UI cableada, render depende del core)
+// -----------------------------------------------------------------------------
+// FIX CLAVE: Day tabs ahora llaman api.syncDayUI(d) con el día correcto
+// EXTRA: Scroll en vista normal: wheel/trackpad SIEMPRE scrollea el tablero
+// EXTRA 2: Firestore error messages ahora muestran code+message (no “dijo que no”)
+// ✅ EXTRA 3 (NUEVO): Bloqueo de choques (si está ocupado, NO deja crear encima y avisa)
+// -----------------------------------------------------------------------------
 
 'use strict';
 
-// ✅ Estructura en RAÍZ (no /src)
-import { auth, provider, db } from "./firebase.js";
-
-// Firebase Auth (CDN)
-import {
-  signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
-  signOut,
-  onAuthStateChanged
-} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import { db } from "./firebase.js";
 
 // Firestore (CDN)
 import {
@@ -30,7 +27,7 @@ import {
   deleteDoc,
   doc,
   serverTimestamp,
-  setDoc // ✅ necesario para importar JSON con IDs fijos (upsert)
+  setDoc,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 import { initCore } from "./horarios.core.js";
@@ -38,18 +35,14 @@ import { initCore } from "./horarios.core.js";
 /* =========================
    CONFIG
 ========================= */
-const DEBUG = false; // true = logs de diagnóstico
-
-const ADMIN_EMAILS = new Set([
-  "musicalaasesor@gmail.com",
-  "imusicala@gmail.com",
-  "alekcaballeromusic@gmail.com",
-  "catalina.medina.leal@gmail.com",
-]);
-
+const DEBUG = new URL(location.href).searchParams.get("debug") === "1";
 const GROUPS_COLLECTION = "groups";
-const ADMIN_KEY = "musicala_admin";
 
+// Choques: si ya hay un bloque en la celda, ¿permitimos agregar otro?
+// ❌ En tu caso: NO. Si está ocupado, avisar y bloquear.
+const ALLOW_COLLISIONS_WITH_CONFIRM = false;
+
+// Días / Salones (se conservan)
 const DAYS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
 
 const ROOMS = [
@@ -59,755 +52,657 @@ const ROOMS = [
   { key:"Salón 4",  short:"S4",  label:"Salón 4",  note:"Música (cuerdas)" },
   { key:"Salón 5",  short:"S5",  label:"Salón 5",  note:"Música (guitarra)" },
   { key:"Salón 6",  short:"S6",  label:"Salón 6",  note:"Artes" },
-  { key:"Salón 7",  short:"S7",  label:"Salón 7",  note:"Chiquis/estimulación" },
-  { key:"Salón 8",  short:"S8",  label:"Salón 8",  note:"Piano prioridad" },
-  { key:"Salón 9",  short:"S9",  label:"Salón 9",  note:"Danzas/Teatro" },
-  { key:"Salón 10", short:"S10", label:"Salón 10", note:"Batería/ensamble" },
+  { key:"Salón 7",  short:"S7",  label:"Salón 7",  note:"Música (piano)" },
+  { key:"Salón 8",  short:"S8",  label:"Salón 8",  note:"Música (batería)" },
+  { key:"Salón 9",  short:"S9",  label:"Salón 9",  note:"Música (canto)" },
+  { key:"Salón 10", short:"S10", label:"Salón 10", note:"Música (ensamble)" },
 ];
 
-// Hora pico
-const PEAK_HOURS = new Set(["16:00","17:00","18:00","19:00"]);
-
-// Base slots (si no hay sesiones aún, igual se ve el tablero)
-const BASE_SLOTS = ["08:00","09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00"];
-
-// Persistencias UI
-const LS_VIEW = "musicala_view";             // "grid"|"list"|"dashboard"|"occupancy"|"conflicts"|"proposals"
-const LS_COLOR_MODE = "musicala_color_mode"; // "area" | "age"
-const LS_HELPERS = "musicala_helpers";       // "1" (on) | "0" (off)
-const LS_ANA_TAB = "musicala_ana_tab";       // "dashboard"|"edad"|"salon"|"area"|"franja"
-
-// Debug helpers
-const DBG = {
-  once: new Set(),
-  log(...a){ if (DEBUG) console.log("[Horarios]", ...a); },
-  onceLog(key, ...a){
-    if (!DEBUG) return;
-    if (this.once.has(key)) return;
-    this.once.add(key);
-    console.log("[Horarios]", ...a);
-  }
-};
+// Rangos horarios
+const PEAK_HOURS = new Set(["15:00","16:00","17:00","18:00","19:00"]);
+const BASE_SLOTS = [
+  "07:00","08:00","09:00","10:00","11:00","12:00",
+  "13:00","14:00","15:00","16:00","17:00","18:00",
+  "19:00","20:00"
+];
 
 /* =========================
    DOM
 ========================= */
-const $ = (sel) => document.querySelector(sel);
-
 const els = {
-  btnLogin: $("#btn-login"),
-  btnLogout: $("#btn-logout"),
+  // topbar
+  btnReload:     document.getElementById("btn-reload"),
+  btnExport:     document.getElementById("btn-export-json"),
+  btnImport:     document.getElementById("btn-import-json"),
+  btnFullscreen: document.getElementById("btn-fullscreen"),
+  fileImport:    document.getElementById("file-import-json"),
 
-  search: $("#search"),
-  fClase: $("#filter-clase"),
-  fEdad: $("#filter-edad"),
+  // sidebar
+  sidebar:       document.getElementById("sidebar"),
+  groupSelect:   document.getElementById("group-select"),
+  search:        document.getElementById("search"),
+  fClase:        document.getElementById("filter-clase"),
+  fEdad:         document.getElementById("filter-edad"),
+  dayTabs:       document.getElementById("day-tabs"),
+  colorByArea:   document.getElementById("color-by-area"),
+  colorByAge:    document.getElementById("color-by-age"),
+  viewGrid:      document.getElementById("view-grid"),
+  viewList:      document.getElementById("view-list"),
+  btnClear:      document.getElementById("btn-clear"),
 
-  info: $("#results-info"),
-  btnNew: $("#btn-new-group"),
+  // board
+  gridWrap:      document.getElementById("grid-wrap"),
+  grid:          document.getElementById("schedule-grid"),
+  list:          document.getElementById("schedule-list"),
+  resultsInfo:   document.getElementById("results-info"),
 
-  dayTabs: $("#day-tabs"),
-  grid: $("#schedule-grid"),
+  // analytics/stats
+  analyticsWrap:     document.getElementById("analyticsWrap"),
+  analyticsTitle:    document.getElementById("analyticsTitle"),
+  analyticsSubtitle: document.getElementById("analyticsSubtitle"),
+  analyticsTabs:     document.getElementById("analyticsTabs"), // puede no existir
+  anaTopTitle:       document.getElementById("anaTopTitle"),
+  anaTopContent:     document.getElementById("anaTopContent"),
+  anaBottomTitle:    document.getElementById("anaBottomTitle"),
+  anaBottomContent:  document.getElementById("anaBottomContent"),
+  anaAlertsContent:  document.getElementById("anaAlertsContent"),
 
-  // Views buttons (toolbar)
-  btnViewGrid: $("#btn-view-grid"),
-  btnViewList: $("#btn-view-list"),
-  btnViewDashboard: $("#btn-view-dashboard"),
-  btnViewOccupancy: $("#btn-view-occupancy"),
-  btnViewConflicts: $("#btn-view-conflicts"),
-  btnViewProposals: $("#btn-view-proposals"),
+  // modal
+  modal:             document.getElementById("modal"),
+  btnModalClose:     document.getElementById("modal-close"),
+  btnModalSave:      document.getElementById("btn-save"),
+  btnModalDelete:    document.getElementById("btn-delete"),
+  btnAddSession:     document.getElementById("btn-add-session"),
+  modalSessionsWrap: document.getElementById("sessions-list"),
 
-  // Toolbar utilities
-  btnClearFilters: $("#btn-clear-filters"),
-  btnReload: $("#btn-reload"),
+  inClase:     document.getElementById("m-clase"),
+  inEdad:      document.getElementById("m-edad"),
+  inEnfoque:   document.getElementById("m-enfoque"),
+  inNivel:     document.getElementById("m-nivel"),
+  inCupoMax:   document.getElementById("m-cupo-max"),
+  inCupoOcu:   document.getElementById("m-cupo-ocupado"),
+  inActivo:    document.getElementById("m-activo"),
 
-  // ✅ Export/Import JSON
-  btnExportJson: $("#btn-export-json"),
-  btnImportJson: $("#btn-import-json"),
-  fileImportJson: $("#file-import-json"),
-
-  // Wraps
-  gridWrap: $("#grid-wrap"),
-  listWrap: $("#schedule-list-wrap"),
-  list: $("#schedule-list"),
-  quickStatsWrap: $("#quick-stats-wrap"),
-  daybarWrap: $("#daybar-wrap"),
-  ageLegendWrap: $("#age-legend-wrap"),
-  analyticsWrap: $("#analytics-wrap"),
-
-  // Stats
-  statTotalGroups: $("#stat-total-groups"),
-  statTotalSessions: $("#stat-total-sessions"),
-  statTotalRooms: $("#stat-total-rooms"),
-  statsByArea: $("#stats-by-area"),
-  statsByAge: $("#stats-by-age"),
-  statsAlerts: $("#stats-alerts"),
-  statsSubtitle: $("#stats-subtitle"),
-
-  // Color/Helpers
-  colorByArea: $("#color-by-area"),
-  colorByAge: $("#color-by-age"),
-  btnToggleHelpers: $("#btn-toggle-helpers"),
-
-  // Analytics UI
-  analyticsTitle: $("#analytics-title"),
-  analyticsSubtitle: $("#analytics-subtitle"),
-
-  tabAnaDashboard: $("#tab-ana-dashboard"),
-  tabAnaEdad: $("#tab-ana-edad"),
-  tabAnaSalon: $("#tab-ana-salon"),
-  tabAnaArea: $("#tab-ana-area"),
-  tabAnaFranja: $("#tab-ana-franja"),
-
-  kpiGroups: $("#kpi-groups"),
-  kpiGroupsSub: $("#kpi-groups-sub"),
-  kpiSessions: $("#kpi-sessions"),
-  kpiSessionsSub: $("#kpi-sessions-sub"),
-  kpiOccupancy: $("#kpi-occupancy"),
-  kpiOccupancySub: $("#kpi-occupancy-sub"),
-  kpiCollisions: $("#kpi-collisions"),
-  kpiCollisionsSub: $("#kpi-collisions-sub"),
-
-  anaTopTitle: $("#ana-render-top-title"),
-  anaTopContent: $("#ana-top-content"),
-  anaBottomTitle: $("#ana-render-bottom-title"),
-  anaBottomContent: $("#ana-bottom-content"),
-  anaAlertsContent: $("#ana-alerts-content"),
-
-  // Modal
-  modal: $("#modal"),
-  modalTitle: $("#modal-title"),
-  modalClose: $("#modal-close"),
-
-  mClase: $("#m-clase"),
-  mEdad: $("#m-edad"),
-  mEnfoque: $("#m-enfoque"),
-  mNivel: $("#m-nivel"),
-  mCupoMax: $("#m-cupo-max"),
-  mCupoOcu: $("#m-cupo-ocupado"),
-  mActivo: $("#m-activo"),
-
-  sessionsList: $("#sessions-list"),
-  btnAddSession: $("#btn-add-session"),
-
-  btnDelete: $("#btn-delete"),
-  btnSave: $("#btn-save"),
-
-  toast: $("#toast"),
+  toast:       document.getElementById("toast"),
 };
 
-function assertDOM(){
-  // ✅ Ya NO existe filter-dia. Día es por tabs.
-  const must = [
-    "results-info",
-    "day-tabs",
-    "schedule-grid",
-    "search",
-    "filter-clase",
-    "filter-edad",
-    "btn-clear-filters",
-    "btn-reload"
-  ];
-  const missing = must.filter(id => !document.getElementById(id));
-  if (missing.length){
-    console.warn("[DOM] Faltan elementos:", missing);
-  }
-}
-assertDOM();
+function log(...a){ if (DEBUG) console.log("[horarios]", ...a); }
 
 /* =========================
-   STATE (shared via ctx)
+   STATE
 ========================= */
 const state = {
-  currentUser: null,
-  isAllowlistedAdmin: false,
-  adminUIEnabled: false,
+  activeDay: "Lunes",
+  activeView: "grid", // "grid" | "list"
+  colorMode: "area",
+  helpersOn: true,    // 🔒 SIEMPRE true
+  fullscreenOn: false,
 
   allGroups: [],
   filteredGroups: [],
 
-  activeDay: getTodayName(),
   unsubscribeGroups: null,
-  _subscribedOnce: false, // ✅ evita doble subscribe
 
-  editingId: null,
-  editingDraft: null,
-
-  activeView: "grid",          // "grid"|"list"|"dashboard"|"occupancy"|"conflicts"|"proposals"
-  colorMode: "area",           // "area" | "age"
-  helpersOn: true,
-
-  activeAnaTab: "dashboard",   // "dashboard"|"edad"|"salon"|"area"|"franja"
-
-  _lastFocus: null,
+  // anti-spam
+  _warnedListOnce: false,
 };
-
-/* =========================
-   TOAST
-========================= */
-function toast(msg){
-  if (!els.toast) { alert(msg); return; }
-  els.toast.textContent = msg;
-  els.toast.classList.add("show");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => els.toast.classList.remove("show"), 2200);
-}
-
-if (location.protocol === "file:") {
-  toast("Esto no funciona bien en file://. Usa Live Server o GitHub Pages.");
-}
 
 /* =========================
    UTILS
 ========================= */
-function keyify(v){
-  return (v ?? "")
-    .toString()
-    .normalize("NFKC")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // quita tildes
-    .replace(/\s+/g, " ");
-}
-function normalize(s){ return keyify(s); }
-
-function htmlEscape(str){
-  return (str ?? "").toString()
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
-}
-
-function isAdminFlagOn(){
-  const qsAdmin = new URLSearchParams(location.search).get("admin");
-  if (qsAdmin === "1") return true;
-  return localStorage.getItem(ADMIN_KEY) === "1";
-}
-
-function setInfo(msg){
-  if (!els.info) return;
-  els.info.textContent = msg;
-}
-
-function clampInt(v, min=0){
-  const n = Number(v);
-  if (!Number.isFinite(n)) return min;
-  return Math.max(min, Math.trunc(n));
-}
-
-function debounce(fn, ms=140){
-  let t = null;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-}
-
-function normalizeHHMM(hhmm){
-  const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm ?? "").trim());
-  if (!m) return "";
-  const h = String(clampInt(m[1], 0)).padStart(2, "0");
-  const mm = String(clampInt(m[2], 0)).padStart(2, "0");
-  return `${h}:${mm}`;
-}
-
-function safeTimeToMinutes(hhmm){
-  const t = normalizeHHMM(hhmm);
-  if (!t) return 9999;
-  const [h, m] = t.split(":").map(Number);
-  return h*60 + m;
-}
-
-function compareSessions(a, b){
-  const da = DAYS.indexOf(a?.day ?? "");
-  const db = DAYS.indexOf(b?.day ?? "");
-  if (da !== db) return da - db;
-  return safeTimeToMinutes(a?.time) - safeTimeToMinutes(b?.time);
-}
-
-function getTodayName(){
-  const d = new Date().getDay(); // 0=Domingo ... 6=Sábado
-  const map = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
-  return map[d] || "Lunes";
-}
-
-function nextDay(day, dir=1){
-  const i = DAYS.indexOf(day);
-  if (i < 0) return "Lunes";
-  return DAYS[(i + dir + DAYS.length) % DAYS.length];
-}
-
-function percent(n){
-  if (!Number.isFinite(n)) return "0%";
-  return `${Math.round(n*100)}%`;
-}
-
-/* =========================
-   DAY/ROOM CANON
-========================= */
-const DAY_CANON = new Map(DAYS.map(d => [keyify(d), d]));
-DAY_CANON.set("sabado", "Sábado");
-DAY_CANON.set("miercoles", "Miércoles");
-
-const ROOM_CANON = new Map(ROOMS.map(r => [keyify(r.key), r.key]));
-for (const r of ROOMS){
-  ROOM_CANON.set(keyify(r.short), r.key);
-  ROOM_CANON.set(keyify(r.label), r.key);
-  ROOM_CANON.set(keyify(r.key.replace("Salón","Salon")), r.key);
-  ROOM_CANON.set(keyify(r.label.replace("Salón","Salon")), r.key);
-}
-
-function canonDay(v){
-  const k = keyify(v);
-  return DAY_CANON.get(k) || (v ?? "").toString().trim();
-}
-function canonRoom(v){
-  const k = keyify(v);
-  return ROOM_CANON.get(k) || (v ?? "").toString().trim();
-}
-
-/* =========================
-   URL STATE (filters)
-   - q/clase/edad son filtros reales
-   - dia es SOLO el tab activo (para compartir vista)
-========================= */
-function readFiltersFromURL(){
-  const p = new URLSearchParams(location.search);
-
-  const q = (p.get("q") ?? "").trim();
-  const clase = (p.get("clase") ?? "").trim();
-  const edad = (p.get("edad") ?? "").trim();
-
-  // dia = tab activo
-  const dia = (p.get("dia") ?? "").trim();
-  if (dia){
-    const dCanon = canonDay(dia);
-    if (DAYS.includes(dCanon)) state.activeDay = dCanon;
-  }
-
-  if (els.search && q) els.search.value = q;
-  if (els.fClase && clase) els.fClase.value = clase;
-  if (els.fEdad && edad) els.fEdad.value = edad;
-}
-
-function writeFiltersToURL(){
-  const p = new URLSearchParams(location.search);
-
-  const q = (els.search?.value ?? "").trim();
-  const clase = (els.fClase?.value ?? "").trim();
-  const edad = (els.fEdad?.value ?? "").trim();
-
-  if (q) p.set("q", q); else p.delete("q");
-  if (clase) p.set("clase", clase); else p.delete("clase");
-  if (edad) p.set("edad", edad); else p.delete("edad");
-
-  // ✅ persistir tab de día (no es filtro)
-  if (state.activeDay && DAYS.includes(state.activeDay)) p.set("dia", state.activeDay);
-  else p.delete("dia");
-
-  const qs = p.toString();
-  const newUrl = qs ? `${location.pathname}?${qs}` : `${location.pathname}`;
-  history.replaceState(null, "", newUrl);
-}
-
-/* =========================
-   AUTH / ADMIN
-========================= */
-async function login(){
-  try{
-    try { provider.setCustomParameters({ prompt: "select_account" }); } catch(_) {}
-
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (isMobile){
-      await signInWithRedirect(auth, provider);
-      return;
-    }
-    await signInWithPopup(auth, provider);
-  }catch(err){
-    console.error(err);
-    const code = err?.code || "";
-    if (code.includes("popup-blocked")) toast("Popup bloqueado. Habilita popups para este sitio.");
-    else if (code.includes("popup-closed-by-user")) toast("Cerraste el popup. Intenta otra vez.");
-    else toast("No se pudo iniciar sesión. Revisa popups/permisos.");
-  }
-}
-
-async function logout(){
-  try{
-    await signOut(auth);
-  }catch(err){
-    console.error(err);
-    toast("No se pudo cerrar sesión.");
-  }
-}
-
-function normalizeEmail(email){
-  return (email ?? "")
-    .toString()
-    .normalize("NFKC")
-    .trim()
-    .toLowerCase();
-}
-
-function computeAllowlist(user){
-  if (!user?.email) return false;
-  const email = normalizeEmail(user.email);
-  if (DEBUG){
-    console.log("📌 ADMIN LIST:", Array.from(ADMIN_EMAILS));
-    console.log("🔎 Checking email:", JSON.stringify(email));
-  }
-  return ADMIN_EMAILS.has(email);
-}
-
-function canEdit(){
-  // Gate de UX. La seguridad real es Firestore Rules.
-  return !!state.currentUser && state.adminUIEnabled && state.isAllowlistedAdmin;
-}
-
-function refreshAdminUI(){
-  state.adminUIEnabled = isAdminFlagOn();
-  const can = canEdit();
-
-  els.btnLogin?.classList.toggle("hidden", !!state.currentUser);
-  els.btnLogout?.classList.toggle("hidden", !state.currentUser);
-  els.btnNew?.classList.toggle("hidden", !can);
-  els.btnDelete?.classList.toggle("hidden", !can);
-
-  // ✅ Export/Import JSON solo para editores
-  els.btnExportJson?.classList.toggle("hidden", !can);
-  els.btnImportJson?.classList.toggle("hidden", !can);
-
-  // Conflictos/Propuestas solo para editores
-  els.btnViewConflicts?.classList.toggle("hidden", !can);
-  els.btnViewProposals?.classList.toggle("hidden", !can);
-
-  if (els.info){
-    const email = state.currentUser?.email ? normalizeEmail(state.currentUser.email) : "";
-    const a = state.adminUIEnabled ? "adminON" : "adminOFF";
-    const e = email ? `· ${email}` : "· sin sesión";
-    const p = state.isAllowlistedAdmin ? "· editor ✅" : (email ? "· solo lectura 👀" : "");
-    els.info.title = `Estado: ${a} ${e} ${p}`;
-  }
-
-  if (state.adminUIEnabled && state.currentUser && !state.isAllowlistedAdmin){
-    toast("Modo admin ON, pero este correo no está en allowlist 👀");
-  }
-}
-
-async function initRedirectResult(){
-  try{
-    const res = await getRedirectResult(auth);
-    if (res?.user) toast("Sesión iniciada ✅");
-  }catch(err){
-    if (err?.code) console.warn("redirectResult:", err.code);
-  }
-}
-
-function explainNoPerm(action){
-  const email = state.currentUser?.email ? normalizeEmail(state.currentUser.email) : "";
-
-  if (!state.currentUser){
-    toast(`No se puede ${action}: no has iniciado sesión.`);
-    return;
-  }
-  if (!state.adminUIEnabled){
-    toast(`No se puede ${action}: falta activar admin (?admin=1 o localStorage musicala_admin=1).`);
-    return;
-  }
-  if (!state.isAllowlistedAdmin){
-    toast(`No se puede ${action}: ${email || "tu correo"} no está en allowlist.`);
-    return;
-  }
-  toast(`No se puede ${action}: algo raro con Auth/Rules (mira consola).`);
-}
-
-function explainFirestoreErr(err){
-  const code = err?.code || "";
-  if (code.includes("permission-denied")){
-    toast("Firestore dijo NO: permission-denied. Rules no te dejan escribir.");
-    return;
-  }
-  if (code.includes("unauthenticated")){
-    toast("Firestore dice unauthenticated. No hay sesión real.");
-    return;
-  }
-  toast("No se pudo guardar. Revisa consola (err).");
-}
-
-/* =========================
-   CTX (shared with core)
-========================= */
-const ctx = {
-  DEBUG,
-  DBG,
-
-  // firebase handles
-  auth, provider, db,
-  fs: { collection, onSnapshot, query, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, setDoc }, // ✅ setDoc
-
-  // config
-  GROUPS_COLLECTION,
-  ADMIN_KEY,
-  DAYS, ROOMS,
-  PEAK_HOURS, BASE_SLOTS,
-  LS_VIEW, LS_COLOR_MODE, LS_HELPERS, LS_ANA_TAB,
-
-  // DOM + state
-  els,
-  state,
-
-  // utilities
-  utils: {
-    keyify, normalize, htmlEscape,
-    clampInt, debounce,
-    normalizeHHMM, safeTimeToMinutes, compareSessions,
-    canonDay, canonRoom,
-    nextDay, percent,
-    setInfo, readFiltersFromURL, writeFiltersToURL,
+const utils = {
+  normalize(s){
+    return (s ?? "")
+      .toString()
+      .normalize("NFD").replace(/\p{Diacritic}/gu,"")
+      .toLowerCase()
+      .trim();
+  },
+  keyify(s){ return utils.normalize(s).replace(/\s+/g,"-"); },
+  htmlEscape(str){
+    return (str ?? "").toString()
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  },
+  clampInt(v, min=0, max=9999){
+    const n = Number.parseInt(v, 10);
+    if (Number.isNaN(n)) return min;
+    return Math.max(min, Math.min(max, n));
+  },
+  debounce(fn, wait=180){
+    let t = null;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), wait);
+    };
+  },
+  normalizeHHMM(x){
+    const s = (x ?? "").toString().trim();
+    const m = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return "";
+    const hh = String(Math.min(23, Math.max(0, parseInt(m[1],10)))).padStart(2,"0");
+    const mm = String(Math.min(59, Math.max(0, parseInt(m[2],10)))).padStart(2,"0");
+    return `${hh}:${mm}`;
+  },
+  safeTimeToMinutes(hhmm){
+    const s = utils.normalizeHHMM(hhmm);
+    if (!s) return 0;
+    const [h,m] = s.split(":").map(n => parseInt(n,10));
+    return h*60 + m;
+  },
+  compareSessions(a,b){
+    return utils.safeTimeToMinutes(a?.time) - utils.safeTimeToMinutes(b?.time);
+  },
+  canonDay(day){
+    const n = (day ?? "").toString().trim();
+    const hit = DAYS.find(d => utils.normalize(d) === utils.normalize(n));
+    return hit || "Lunes";
+  },
+  canonRoom(room){
+    const n = (room ?? "").toString().trim();
+    const hit = ROOMS.find(r =>
+      utils.normalize(r.key) === utils.normalize(n) ||
+      utils.normalize(r.label) === utils.normalize(n)
+    );
+    return hit?.key || "Salón 1";
+  },
+  percent(num, den){
+    const a = Number(num)||0, b = Number(den)||0;
+    if (!b) return 0;
+    return Math.round((a/b)*100);
+  },
+  setInfo(msg){
+    if (!els.resultsInfo) return;
+    els.resultsInfo.textContent = msg || "—";
   },
 
-  // UX helpers
-  toast,
+  // URL state (PC-first, helpers always on)
+  readFiltersFromURL(){
+    const u = new URL(location.href);
+    const dia  = u.searchParams.get("dia");
+    const cm   = u.searchParams.get("color");
+    const fs   = u.searchParams.get("fs");
+    const view = u.searchParams.get("view"); // "grid" | "list"
 
-  // permissions
-  perms: { canEdit, refreshAdminUI, explainNoPerm, explainFirestoreErr, normalizeEmail },
+    if (dia) state.activeDay = utils.canonDay(dia);
+    if (cm === "age") state.colorMode = "age";
+    if (cm === "area") state.colorMode = "area";
+    if (fs === "1") state.fullscreenOn = true;
+
+    // Helpers SIEMPRE activos (ignora URL)
+    state.helpersOn = true;
+
+    state.activeView = (view === "list") ? "list" : "grid";
+
+    const q     = u.searchParams.get("q");
+    const clase = u.searchParams.get("clase");
+    const edad  = u.searchParams.get("edad");
+    const gid   = u.searchParams.get("grupo");
+
+    if (els.search && q != null) els.search.value = q;
+    if (els.fClase && clase != null) els.fClase.value = clase;
+    if (els.fEdad && edad != null) els.fEdad.value = edad;
+    if (els.groupSelect && gid != null) els.groupSelect.value = gid;
+  },
+
+  writeFiltersToURL(){
+    const u = new URL(location.href);
+
+    const q     = (els.search?.value ?? "").toString();
+    const clase = (els.fClase?.value ?? "").toString();
+    const edad  = (els.fEdad?.value ?? "").toString();
+    const gid   = (els.groupSelect?.value ?? "").toString();
+
+    u.searchParams.set("dia", state.activeDay);
+    u.searchParams.set("color", state.colorMode === "age" ? "age" : "area");
+    u.searchParams.set("fs", state.fullscreenOn ? "1" : "0");
+    u.searchParams.set("view", state.activeView === "list" ? "list" : "grid");
+
+    if (q) u.searchParams.set("q", q); else u.searchParams.delete("q");
+    if (clase) u.searchParams.set("clase", clase); else u.searchParams.delete("clase");
+    if (edad) u.searchParams.set("edad", edad); else u.searchParams.delete("edad");
+    if (gid) u.searchParams.set("grupo", gid); else u.searchParams.delete("grupo");
+
+    history.replaceState(null, "", u.toString());
+  },
+
+  // Errores Firestore legibles
+  formatFirestoreErr(err){
+    const code = (err?.code || "").toString();
+    const msg  = (err?.message || "").toString();
+
+    if (code.includes("permission-denied")){
+      return "Firestore bloqueó la escritura: permission-denied (Rules/Auth).";
+    }
+    if (code.includes("unauthenticated")){
+      return "Firestore exige autenticación: unauthenticated.";
+    }
+    if (code.includes("not-found")){
+      return "Documento no encontrado: not-found.";
+    }
+    if (code.includes("failed-precondition")){
+      return "Firestore: failed-precondition (índices / estado / precondición).";
+    }
+    if (code.includes("invalid-argument")){
+      return `Firestore: invalid-argument${msg ? " · " + msg : ""}`;
+    }
+    return `${code || "firestore-error"}${msg ? " · " + msg : ""}`.trim();
+  }
 };
 
+function toast(msg, type=""){
+  const el = els.toast;
+  if (!el) return;
+  el.textContent = msg;
+  el.className = "toast show " + (type ? `toast-${type}` : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => {
+    el.className = "toast";
+    el.textContent = "";
+  }, 2600);
+}
+
 /* =========================
-   CORE INIT (returns API)
+   Scroll helper (PC-first)
+   - Captura wheel/trackpad y SIEMPRE scrollea .schedule-scroll
 ========================= */
+function wireWheelToBoardScroll(){
+  const isEditable = (el) => {
+    if (!el) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+  };
+
+  const getScroller = () =>
+    document.querySelector(".schedule-scroll") ||
+    els.gridWrap?.querySelector?.(".schedule-scroll");
+
+  document.addEventListener("wheel", (e) => {
+    if (e.ctrlKey) return;              // ctrl+wheel = zoom
+    if (isEditable(e.target)) return;   // no joder inputs
+    if (e.target?.closest?.("#modal")) return;
+
+    const scroller = getScroller();
+    if (!scroller) return;
+
+    // Capturamos SIEMPRE y scrolleamos manualmente
+    e.preventDefault();
+
+    const dy = e.deltaY || 0;
+    const dx = e.deltaX || 0;
+
+    scroller.scrollTop  += dy;
+    scroller.scrollLeft += dx;
+  }, { passive:false });
+}
+
+/* =========================
+   Day tabs UI
+========================= */
+function renderDayTabs(){
+  if (!els.dayTabs) return;
+
+  els.dayTabs.innerHTML = "";
+  const frag = document.createDocumentFragment();
+
+  DAYS.forEach(d => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "day-tab";
+    b.setAttribute("role","tab");
+    b.setAttribute("aria-selected", d === state.activeDay ? "true" : "false");
+    b.textContent = d;
+
+    b.addEventListener("click", () => {
+      // ✅ FIX: siempre pasar el día al core
+      if (api?.syncDayUI){
+        api.syncDayUI(d);
+      } else {
+        state.activeDay = d;
+        utils.writeFiltersToURL();
+        api?.applyFiltersAndRender?.({ force:true });
+      }
+      syncDayTabsUI();
+    });
+
+    frag.appendChild(b);
+  });
+
+  els.dayTabs.appendChild(frag);
+}
+
+function syncDayTabsUI(){
+  if (!els.dayTabs) return;
+
+  [...els.dayTabs.querySelectorAll(".day-tab")].forEach(btn => {
+    const isActive = utils.normalize(btn.textContent) === utils.normalize(state.activeDay);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+    btn.classList.toggle("is-active", isActive);
+  });
+}
+
+/* =========================
+   Vista (Tablero / Lista)
+========================= */
+function applyViewUI(mode, opts={ silent:false }){
+  state.activeView = (mode === "list") ? "list" : "grid";
+
+  if (els.viewGrid) els.viewGrid.checked = state.activeView === "grid";
+  if (els.viewList) els.viewList.checked = state.activeView === "list";
+
+  if (els.grid) els.grid.classList.toggle("hidden", state.activeView !== "grid");
+  if (els.list) els.list.classList.toggle("hidden", state.activeView !== "list");
+
+  utils.writeFiltersToURL();
+
+  api?.showOnly?.(state.activeView);
+  api?.applyFiltersAndRender?.({ force:true });
+
+  if (!opts.silent && state.activeView === "list" && els.list){
+    const empty = !els.list.innerHTML.trim();
+    if (empty && !state._warnedListOnce){
+      state._warnedListOnce = true;
+      toast("Vista Lista activada. (Si no ves nada, falta render de lista en el core).", "warn");
+    }
+  }
+}
+
+/* =========================
+   Fullscreen (UI) + native fullscreen (cross-browser)
+========================= */
+function applyFullscreenUI(on){
+  state.fullscreenOn = !!on;
+  document.body.classList.toggle("fullscreen-board", state.fullscreenOn);
+
+  if (els.btnFullscreen){
+    els.btnFullscreen.textContent = state.fullscreenOn ? "Salir" : "Pantalla completa";
+    els.btnFullscreen.setAttribute("aria-pressed", state.fullscreenOn ? "true" : "false");
+    els.btnFullscreen.title = state.fullscreenOn
+      ? "Salir de pantalla completa"
+      : "Ver solo el tablero en pantalla completa";
+  }
+
+  utils.writeFiltersToURL();
+}
+
+function isNativeFullscreenEnabled(){
+  return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+}
+function getNativeFullscreenElement(){
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+async function tryNativeFullscreen(on){
+  if (!isNativeFullscreenEnabled()) return;
+
+  const target = els.gridWrap || document.getElementById("grid-wrap") || document.documentElement;
+
+  try{
+    if (on){
+      if (!getNativeFullscreenElement()){
+        const req = target.requestFullscreen || target.webkitRequestFullscreen;
+        if (req) await req.call(target);
+      }
+    } else {
+      if (getNativeFullscreenElement()){
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        if (exit) await exit.call(document);
+      }
+    }
+  }catch(err){
+    log("native fullscreen failed:", err);
+  }
+}
+
+function wireFullscreen(){
+  if (!els.btnFullscreen) return;
+
+  els.btnFullscreen.addEventListener("click", async () => {
+    const next = !state.fullscreenOn;
+    applyFullscreenUI(next);
+    await tryNativeFullscreen(next);
+  });
+
+  const onFsChange = () => {
+    const isFs = !!getNativeFullscreenElement();
+    if (!isFs && state.fullscreenOn){
+      applyFullscreenUI(false);
+    }
+  };
+
+  document.addEventListener("fullscreenchange", onFsChange);
+  document.addEventListener("webkitfullscreenchange", onFsChange);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (state.fullscreenOn){
+      applyFullscreenUI(false);
+      tryNativeFullscreen(false);
+    }
+  });
+}
+
+/* =========================
+   Body classes sync
+========================= */
+function applyBodyModeClasses(){
+  state.helpersOn = true;
+  document.body.classList.toggle("helpers-on", true);
+  document.body.classList.toggle("color-mode-area", state.colorMode !== "age");
+  document.body.classList.toggle("color-mode-age", state.colorMode === "age");
+}
+
+/* =========================
+   CORE CONTEXT
+========================= */
+const ctx = {
+  els,
+  state,
+  utils,
+  toast,
+
+  db,
+  GROUPS_COLLECTION,
+  fs: {
+    collection,
+    onSnapshot,
+    query,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    doc,
+    serverTimestamp,
+    setDoc,
+  },
+
+  DAYS,
+  ROOMS,
+  PEAK_HOURS,
+  BASE_SLOTS,
+
+  // Permisos: modo sin-login. La UI edita; Firestore podría bloquear por Rules.
+  perms: {
+    canEdit: () => true,
+    refreshAdminUI: () => {},
+    explainNoPerm: () => toast("Edición deshabilitada.", "warn"),
+    explainFirestoreErr: (err) => {
+      const pretty = utils.formatFirestoreErr(err);
+      console.error("[Firestore]", err);
+      toast(pretty, "danger");
+    },
+    normalizeEmail: (x) => (x ?? "").toString().trim().toLowerCase(),
+  }
+};
+
 const api = initCore(ctx);
+
+/* =============================================================================
+   CHOQUES (UI): BLOQUEO TOTAL
+   - Si el usuario intenta “crear” en una celda que ya tiene bloques, se frena.
+   - No afecta click sobre un bloque (eso es editar).
+============================================================================= */
+function wireCollisionBlocker(){
+  // Si alguien decide activar "permitir con confirm", este bloqueador no se mete.
+  if (ALLOW_COLLISIONS_WITH_CONFIRM) return;
+
+  const getSlotCell = (target) => (
+    target.closest?.(".sg-cell-slot") ||
+    target.closest?.(".sg-cell") ||
+    target.closest?.("[data-room][data-time]")
+  );
+
+  const isInsideGrid = (target) => {
+    const gridEl = els.grid || document.getElementById("schedule-grid");
+    return !!(gridEl && gridEl.contains(target));
+  };
+
+  document.addEventListener("click", (e) => {
+    if (!isInsideGrid(e.target)) return;
+    if (e.target?.closest?.("#modal")) return;
+
+    // Si el click fue sobre un bloque, es editar. No estorbamos.
+    if (e.target?.closest?.(".sg-block")) return;
+
+    const cell = getSlotCell(e.target);
+    if (!cell) return;
+
+    // Necesitamos que sea un slot con room/time
+    const room = cell.dataset?.room;
+    const time = cell.dataset?.time;
+    if (!room || !time) return;
+
+    // ¿Hay ya bloque(s)?
+    const hasBlock = !!cell.querySelector(".sg-block");
+    if (!hasBlock) return;
+
+    // Bloquear creación encima
+    e.stopPropagation();
+    e.preventDefault();
+
+    const day = state.activeDay || "—";
+    toast(`🚫 Ocupado: ${day} ${time} en ${room}`, "danger");
+  }, true); // capture: nos adelantamos al handler del core
+}
 
 /* =========================
    EVENTS
 ========================= */
 function wireEvents(){
-  els.btnLogin?.addEventListener("click", login);
-  els.btnLogout?.addEventListener("click", logout);
+  // Reload
+  els.btnReload?.addEventListener("click", () => api?.reload?.({ force:true }));
 
-  const onFilterChanged = () => {
-    ctx.utils.writeFiltersToURL();
-    api.applyFiltersAndRender();
+  // Export / Import JSON (backup)
+  els.btnExport?.addEventListener("click", () => api?.exportBackup?.());
+  els.btnImport?.addEventListener("click", () => els.fileImport?.click());
+  els.fileImport?.addEventListener("change", (e) => api?.importBackupFromFile?.(e));
+
+  // Filters
+  const apply = () => {
+    utils.writeFiltersToURL();
+    api?.applyFiltersAndRender?.({ force:true });
   };
+  const applySearch = utils.debounce(apply, 140);
 
-  const onSearch = ctx.utils.debounce(() => {
-    ctx.utils.writeFiltersToURL();
-    api.applyFiltersAndRender();
-  }, 140);
+  els.groupSelect?.addEventListener("change", apply);
+  els.search?.addEventListener("input", applySearch);
+  els.fClase?.addEventListener("change", apply);
+  els.fEdad?.addEventListener("change", apply);
 
-  els.search?.addEventListener("input", onSearch);
-  els.search?.addEventListener("change", () => ctx.utils.writeFiltersToURL());
+  // Color toggles
+  els.colorByArea?.addEventListener("change", () => {
+    if (!els.colorByArea.checked) return;
+    state.colorMode = "area";
+    applyBodyModeClasses();
+    utils.writeFiltersToURL();
+    api?.applyFiltersAndRender?.({ force:true });
+  });
 
-  els.fClase?.addEventListener("change", onFilterChanged);
-  els.fEdad?.addEventListener("change", onFilterChanged);
+  els.colorByAge?.addEventListener("change", () => {
+    if (!els.colorByAge.checked) return;
+    state.colorMode = "age";
+    applyBodyModeClasses();
+    utils.writeFiltersToURL();
+    api?.applyFiltersAndRender?.({ force:true });
+  });
 
-  // ✅ Limpiar filtros
-  els.btnClearFilters?.addEventListener("click", () => {
+  // Vista (radios)
+  els.viewGrid?.addEventListener("change", () => {
+    if (els.viewGrid.checked) applyViewUI("grid");
+  });
+  els.viewList?.addEventListener("change", () => {
+    if (els.viewList.checked) applyViewUI("list");
+  });
+
+  // Clear filters
+  els.btnClear?.addEventListener("click", () => {
     if (els.search) els.search.value = "";
     if (els.fClase) els.fClase.value = "";
     if (els.fEdad) els.fEdad.value = "";
-    ctx.utils.writeFiltersToURL();
-    api.applyFiltersAndRender();
-    toast("Filtros limpios ✅");
+    if (els.groupSelect) els.groupSelect.value = "";
+    utils.writeFiltersToURL();
+    api?.applyFiltersAndRender?.({ force:true });
   });
 
-  // ✅ Recargar datos (resuscribe / rehydrate)
-  els.btnReload?.addEventListener("click", async () => {
-    try{
-      toast("Recargando…");
-      if (typeof api.reload === "function"){
-        await api.reload();
-      } else if (typeof api.subscribeGroupsOnce === "function"){
-        // fallback: re-subscribe. El core debería manejar "unsubscribe old".
-        api.subscribeGroupsOnce({ force:true });
-      } else {
-        // último recurso: refrescar página
-        location.reload();
-      }
-    }catch(err){
-      console.error(err);
-      toast("No se pudo recargar. Mira consola.");
-    }
+  // Errores globales para no “morir en silencio”
+  window.addEventListener("error", (e) => {
+    console.error("[window.error]", e?.error || e);
+    if (DEBUG) toast("Error JS (mira consola).", "danger");
   });
-
-  // Tabs día: cuando core cambie el día, que URL quede coherente
-  // (el core debería llamar writeFiltersToURL() cuando syncDayUI, pero aquí lo aseguramos)
-  // Esto NO depende de un select.
-  // Nota: api.syncDayUI(d) ya debería setear state.activeDay.
-  // Aquí solo te dejamos el atajo de teclado abajo.
-
-  els.btnNew?.addEventListener("click", () => {
-    if (!canEdit()) { explainNoPerm("crear"); return; }
-    api.openModalNew();
-  });
-
-  // ✅ Export/Import JSON
-  els.btnExportJson?.addEventListener("click", async () => {
-    if (!canEdit()) { explainNoPerm("exportar"); return; }
-    if (typeof api.exportJSON !== "function"){
-      toast("exportJSON() no está en core. Revisa horarios.core.js.");
-      return;
-    }
-    await api.exportJSON();
-  });
-
-  els.btnImportJson?.addEventListener("click", () => {
-    if (!canEdit()) { explainNoPerm("importar"); return; }
-    if (!els.fileImportJson){
-      toast("No encuentro #file-import-json en el DOM.");
-      return;
-    }
-    els.fileImportJson.click();
-  });
-
-  els.fileImportJson?.addEventListener("change", async (e) => {
-    if (!canEdit()) { explainNoPerm("importar"); return; }
-    const file = e.target?.files?.[0];
-    if (!file) return;
-
-    if (typeof api.importJSONFile !== "function"){
-      toast("importJSONFile() no está en core. Revisa horarios.core.js.");
-      e.target.value = "";
-      return;
-    }
-
-    await api.importJSONFile(file);
-    e.target.value = ""; // permite reimportar el mismo archivo si toca
-  });
-
-  els.modalClose?.addEventListener("click", api.closeModal);
-  els.modal?.addEventListener("click", (e) => { if (e.target === els.modal) api.closeModal(); });
-
-  window.addEventListener("keydown", (e) => {
-    const modalOpen = !els.modal?.classList.contains("hidden");
-
-    if (e.key === "Escape" && modalOpen) api.closeModal();
-
-    if (modalOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s"){
-      e.preventDefault();
-      api.saveGroup();
-    }
-
-    if (document.activeElement?.closest?.("#day-tabs")){
-      if (e.key === "ArrowRight"){
-        e.preventDefault();
-        api.syncDayUI(nextDay(state.activeDay, +1));
-        ctx.utils.writeFiltersToURL();
-      } else if (e.key === "ArrowLeft"){
-        e.preventDefault();
-        api.syncDayUI(nextDay(state.activeDay, -1));
-        ctx.utils.writeFiltersToURL();
-      }
-    }
-  });
-
-  els.btnAddSession?.addEventListener("click", api.addSession);
-  els.btnSave?.addEventListener("click", api.saveGroup);
-  els.btnDelete?.addEventListener("click", api.deleteGroup);
-
-  // Views
-  els.btnViewGrid?.addEventListener("click", () => api.setView("grid"));
-  els.btnViewList?.addEventListener("click", () => api.setView("list"));
-  els.btnViewDashboard?.addEventListener("click", () => api.setView("dashboard"));
-  els.btnViewOccupancy?.addEventListener("click", () => api.setView("occupancy"));
-  els.btnViewConflicts?.addEventListener("click", () => api.setView("conflicts"));
-  els.btnViewProposals?.addEventListener("click", () => api.setView("proposals"));
-
-  // Analytics tabs
-  const bindAna = (btn, tab) => {
-    btn?.addEventListener("click", () => {
-      api.applyAnalyticsTabUI(tab);
-      if (state.activeView === "dashboard" || state.activeView === "occupancy") api.renderAnalytics(state.activeView);
-    });
-  };
-  bindAna(els.tabAnaDashboard, "dashboard");
-  bindAna(els.tabAnaEdad, "edad");
-  bindAna(els.tabAnaSalon, "salon");
-  bindAna(els.tabAnaArea, "area");
-  bindAna(els.tabAnaFranja, "franja");
-
-  // Color mode
-  els.colorByArea?.addEventListener("change", () => {
-    state.colorMode = "area";
-    api.applyColorModeUI();
-    if (state.activeView === "grid") api.renderGrid();
-    else if (state.activeView === "list") api.renderList();
-  });
-  els.colorByAge?.addEventListener("change", () => {
-    state.colorMode = "age";
-    api.applyColorModeUI();
-    if (state.activeView === "grid") api.renderGrid();
-    else if (state.activeView === "list") api.renderList();
-  });
-
-  // Helpers toggle
-  els.btnToggleHelpers?.addEventListener("click", () => {
-    state.helpersOn = !state.helpersOn;
-    api.applyHelpersUI();
-    if (state.activeView === "grid") api.renderGrid();
-    else if (state.activeView === "list") api.renderList();
+  window.addEventListener("unhandledrejection", (e) => {
+    console.error("[unhandledrejection]", e?.reason || e);
+    if (DEBUG) toast("Promesa rechazada (mira consola).", "danger");
   });
 }
 
 /* =========================
    INIT
 ========================= */
-async function init(){
-  api.initViewFromStorage();
-  ctx.utils.readFiltersFromURL();
-  api.initUIModes();
+function init(){
+  utils.setInfo("Cargando…");
+  utils.readFiltersFromURL();
+
+  if (state.colorMode === "age"){
+    if (els.colorByAge) els.colorByAge.checked = true;
+  } else {
+    if (els.colorByArea) els.colorByArea.checked = true;
+  }
+
+  state.helpersOn = true;
+  applyBodyModeClasses();
+
+  renderDayTabs();
+  syncDayTabsUI();
+
+  applyViewUI(state.activeView, { silent:true });
 
   wireEvents();
-  api.renderDayTabs();
+  wireFullscreen();
 
-  await initRedirectResult();
+  wireWheelToBoardScroll();
 
-  onAuthStateChanged(auth, (user) => {
-    state.currentUser = user || null;
-    state.adminUIEnabled = isAdminFlagOn();
-    state.isAllowlistedAdmin = computeAllowlist(user);
+  // ✅ Bloqueo de choques (UI)
+  wireCollisionBlocker();
 
-    if (DEBUG){
-      console.log("[AUTH] user:", user);
-      console.log("[AUTH] email:", user?.email);
-      console.log("[AUTH] adminFlag:", state.adminUIEnabled);
-      console.log("[AUTH] allowlist:", state.isAllowlistedAdmin);
-    } else {
-      DBG.onceLog("authState",
-        "[AUTH]",
-        "email:", user?.email,
-        "adminFlag:", state.adminUIEnabled,
-        "allowlist:", state.isAllowlistedAdmin
-      );
-    }
+  // Render inicial
+  api?.reload?.({ force:true });
 
-    refreshAdminUI();
+  if (api?.syncDayUI){
+    api.syncDayUI(state.activeDay);
+  } else {
+    api?.applyFiltersAndRender?.({ force:true });
+  }
 
-    // ✅ Subscribe una sola vez (evita “doble onSnapshot” que se siente como lag + duplicados)
-    if (!state._subscribedOnce){
-      state._subscribedOnce = true;
-      api.subscribeGroupsOnce();
-    } else {
-      // si hay cambios de sesión, deja que core decida si necesita rehidratar permisos
-      if (typeof api.onAuthChanged === "function") api.onAuthChanged();
-    }
-  });
+  if (state.fullscreenOn){
+    applyFullscreenUI(true);
+    tryNativeFullscreen(true);
+  }
 
-  // fallback: si por algún motivo no suscribió, lo intenta
-  setTimeout(() => {
-    if (!state.unsubscribeGroups && !state._subscribedOnce){
-      state._subscribedOnce = true;
-      api.subscribeGroupsOnce();
-    }
-  }, 1200);
-
-  // view initial
-  setTimeout(() => api.setView(state.activeView), 0);
-
-  // URL coherente desde arranque (incluye dia=tab)
-  ctx.utils.writeFiltersToURL();
+  if (!DEBUG){
+    log("Tip: agrega ?debug=1 para ver más toasts de errores.");
+  }
 }
 
 init();
