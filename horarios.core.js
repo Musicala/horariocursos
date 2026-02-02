@@ -1,12 +1,13 @@
 // horarios.core.js
 // ------------------------------------------------------------
-// Horarios Grupales · Musicala — Core (Simplificado PRO) v5.2
+// Horarios Grupales · Musicala — Core (Simplificado PRO) v5.3
 // - Firestore: subscribe groups, CRUD, upsert import
 // - Vista: Grid / Lista (main.js controla UI; core renderiza según state.activeView)
 // - Filtros: grupo, búsqueda, clase, edad
 // - Modal: crear/editar/eliminar + sesiones (día/hora/salón)
 // - Backup: export/import JSON
 // - ✅ Anti-choques: valida ocupación global al guardar (día/hora/salón)
+// - ✅ NEW: UI mini para crear/eliminar grupos desde el filtro (group-modal)
 // - Perf: delegación de eventos en grid, fragments, renders limpios, render cache
 // ------------------------------------------------------------
 
@@ -16,7 +17,7 @@ export function initCore(ctx){
   const { els, state, utils, toast, perms } = ctx;
   const { DAYS, ROOMS, PEAK_HOURS, BASE_SLOTS } = ctx;
 
-  const CORE_VERSION = "core.v5.2-grid-list-modal-backup-anti-collisions";
+  const CORE_VERSION = "core.v5.3-grid-list-modal-backup-anti-collisions-group-mini-crud";
 
   /* =========================================================
      CONSTANTS / HELPERS
@@ -118,6 +119,10 @@ export function initCore(ctx){
     el.textContent = txt ?? "";
   }
 
+  function getEl(id){
+    return document.getElementById(id);
+  }
+
   /* =========================================================
      RENDER CACHE (simple)
   ========================================================= */
@@ -132,7 +137,6 @@ export function initCore(ctx){
     const edad  = (els.fEdad?.value ?? "").trim();
     const gid   = (els.groupSelect?.value ?? "").trim();
 
-    // Ojo: no dependas de filteredGroups length, eso cambia dentro del render.
     return [
       state.activeDay,
       state.activeView,
@@ -298,9 +302,7 @@ export function initCore(ctx){
   }
 
   /* =========================================================
-     COLLISION CHECK (GLOBAL) — ✅ CLAVE
-     - Revisa si alguna sesión del payload choca con sesiones de otros grupos
-     - Excluye el mismo grupo si estamos editando (sameId)
+     COLLISION CHECK (GLOBAL)
   ========================================================= */
   function buildGlobalOccupancyIndex(groups, { excludeId=null } = {}){
     const occ = new Map(); // key -> { groupId, label }
@@ -410,7 +412,6 @@ export function initCore(ctx){
   }
 
   function renderStats(){
-    // Stats “clásicos” si existen en el HTML (no asumimos)
     const st = computeStats(state.filteredGroups, state.activeDay);
 
     safeElSetText(els.statTotalGroups,   String(st.groupsCount));
@@ -441,7 +442,7 @@ export function initCore(ctx){
   }
 
   /* =========================================================
-     MODAL + CRUD
+     MODAL PRINCIPAL (editor de grupos con sesiones)
   ========================================================= */
   const M = {
     modal: els.modal,
@@ -647,13 +648,13 @@ export function initCore(ctx){
       return;
     }
 
-    // ✅ 1) No permitir duplicados dentro del mismo grupo
+    // ✅ 1) No duplicados dentro del mismo grupo
     if (hasDuplicateInsideSameGroup(payload.sessions)){
       toast("🚫 Este grupo tiene dos sesiones iguales (mismo día/hora/salón).", "danger");
       return;
     }
 
-    // ✅ 2) No permitir choques contra otros grupos (global)
+    // ✅ 2) No choques globales
     const activeId = state.activeGroup?.id || null;
     const occIndex = buildGlobalOccupancyIndex(state.allGroups || [], { excludeId: activeId });
     const collision = findFirstCollision(payload.sessions, occIndex);
@@ -753,6 +754,195 @@ export function initCore(ctx){
 
     M.btnSave?.addEventListener("click", saveGroup);
     M.btnDelete?.addEventListener("click", deleteGroup);
+  }
+
+  /* =========================================================
+     MINI MODAL: Crear / Eliminar grupos desde el filtro
+     - IDs del HTML:
+       btn-group-add, btn-group-delete
+       group-modal, group-modal-close
+       g-enfoque, g-edad, g-clase
+       btn-group-modal-save, btn-group-modal-delete, btn-group-modal-cancel
+     - NO mete sesiones. Solo crea doc para que aparezca en el selector.
+  ========================================================= */
+  const GM = {
+    openBtn:  els.btnGroupAdd   || getEl("btn-group-add"),
+    delBtn:   els.btnGroupDelete|| getEl("btn-group-delete"),
+
+    modal:    els.groupModal    || getEl("group-modal"),
+    closeBtn: els.groupModalClose || getEl("group-modal-close"),
+
+    inEnfoque: els.gEnfoque || getEl("g-enfoque"),
+    inEdad:    els.gEdad    || getEl("g-edad"),
+    inClase:   els.gClase   || getEl("g-clase"),
+
+    btnSave:   els.btnGroupModalSave   || getEl("btn-group-modal-save"),
+    btnDelSel: els.btnGroupModalDelete || getEl("btn-group-modal-delete"),
+    btnCancel: els.btnGroupModalCancel || getEl("btn-group-modal-cancel"),
+  };
+
+  function groupModalOpen(){
+    if (!GM.modal) return;
+    GM.modal.setAttribute("aria-hidden","false");
+    document.body.classList.add("modal-open-lite");
+    // foco amable
+    setTimeout(() => {
+      GM.inEnfoque?.focus?.({ preventScroll:true });
+    }, 0);
+  }
+
+  function groupModalClose(){
+    if (!GM.modal) return;
+    GM.modal.setAttribute("aria-hidden","true");
+    document.body.classList.remove("modal-open-lite");
+  }
+
+  function groupModalClear(){
+    if (GM.inEnfoque) GM.inEnfoque.value = "";
+    if (GM.inEdad) GM.inEdad.value = "";
+    if (GM.inClase) GM.inClase.value = "";
+  }
+
+  function readGroupMiniForm(){
+    const enfoque = (GM.inEnfoque?.value ?? "").toString().trim();
+    const edad    = (GM.inEdad?.value ?? "").toString().trim();
+    const clase   = (GM.inClase?.value ?? "").toString().trim();
+    return { enfoque, edad, clase };
+  }
+
+  function buildMiniLabel({ enfoque, edad, clase }){
+    return [enfoque, edad, clase].filter(Boolean).join(" · ").trim();
+  }
+
+  async function createGroupMini(){
+    // intencional: NO pedimos perms/login aquí, porque el usuario pidió no pensar en eso.
+    // si Firestore bloquea, se mostrará el error y ya.
+
+    const data = readGroupMiniForm();
+    const label = buildMiniLabel(data);
+
+    if (!label){
+      toast("Escribe al menos Enfoque o selecciona Edad/Área.", "warn");
+      return;
+    }
+
+    // Anti-duplicado suave (solo para evitar que creen el mismo nombre 8 veces en 1 minuto)
+    const existing = (state.allGroups || []).some(g => {
+      const a = utils.normalize(buildMiniLabel({
+        enfoque: g.enfoque || "",
+        edad: g.edad || "",
+        clase: g.clase || "",
+      }));
+      const b = utils.normalize(label);
+      return a && b && a === b;
+    });
+
+    if (existing){
+      const ok = confirm(`Ese grupo ya parece existir:\n\n${label}\n\n¿Igual quieres crear otro?`);
+      if (!ok) return;
+    }
+
+    try{
+      utils.setInfo("Creando grupo…");
+
+      const payload = {
+        enfoque: data.enfoque || "",
+        edad: data.edad || "",
+        clase: data.clase || "",
+        activo: true,
+        sessions: [],        // vacío: existe para el filtro, y ya luego le metes sesiones en el modal grande
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+
+      const colRef = ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION);
+      const docRef = ctx.fs.doc(colRef); // id auto
+      await ctx.fs.setDoc(docRef, payload, { merge:true });
+
+      toast("Grupo creado ✅ (sin horarios aún)", "success");
+      groupModalClear();
+      groupModalClose();
+      renderCache.reset();
+      utils.setInfo("Listo.");
+    }catch(err){
+      console.error(err);
+      toast("No se pudo crear. Firestore dijo NO. (Rules o conexión)", "danger");
+      utils.setInfo("Error creando grupo.");
+    }
+  }
+
+  async function deleteSelectedGroupMini(){
+    const id = (els.groupSelect?.value ?? "").toString().trim();
+    if (!id){
+      toast("Selecciona un grupo primero (no 'Todos').", "warn");
+      return;
+    }
+
+    const g = (state.allGroups || []).find(x => x.id === id);
+    const label = g
+      ? ([g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ") || id)
+      : id;
+
+    const ok = confirm(`¿Eliminar este grupo?\n\n${label}\n\nEsto no se puede deshacer.`);
+    if (!ok) return;
+
+    try{
+      utils.setInfo("Eliminando grupo…");
+      const docRef = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
+      await ctx.fs.deleteDoc(docRef);
+
+      toast("Grupo eliminado ✅");
+      groupModalClose();
+      renderCache.reset();
+      utils.setInfo("Listo.");
+    }catch(err){
+      console.error(err);
+      toast("No se pudo eliminar. Firestore bloqueó la acción.", "danger");
+      utils.setInfo("Error eliminando grupo.");
+    }
+  }
+
+  function wireGroupMiniCrudOnce(){
+    // Si no existe el modal/btns en HTML, no hacemos nada y ya.
+    const hasAny = !!(GM.openBtn || GM.delBtn || GM.modal);
+    if (!hasAny) return;
+
+    // Marcar en modal para no duplicar wiring
+    if (GM.modal && GM.modal.__wired) return;
+    if (GM.modal) GM.modal.__wired = true;
+
+    // Abrir modal
+    GM.openBtn?.addEventListener("click", () => {
+      groupModalOpen();
+    });
+
+    // Botón eliminar rápido (sin abrir modal)
+    GM.delBtn?.addEventListener("click", () => {
+      deleteSelectedGroupMini();
+    });
+
+    // Cerrar modal: backdrop + botones con data-close
+    if (GM.modal){
+      GM.modal.addEventListener("click", (e) => {
+        const t = e.target;
+        const close = t?.getAttribute?.("data-close");
+        if (close === "group-modal") groupModalClose();
+      });
+    }
+
+    GM.closeBtn?.addEventListener("click", groupModalClose);
+    GM.btnCancel?.addEventListener("click", groupModalClose);
+
+    // Guardar/Eliminar desde modal
+    GM.btnSave?.addEventListener("click", createGroupMini);
+    GM.btnDelSel?.addEventListener("click", deleteSelectedGroupMini);
+
+    // Escape para cerrar
+    document.addEventListener("keydown", (e) => {
+      if (!GM.modal) return;
+      if (GM.modal.getAttribute("aria-hidden") !== "false") return;
+      if (e.key === "Escape") groupModalClose();
+    });
   }
 
   /* =========================================================
@@ -914,7 +1104,7 @@ export function initCore(ctx){
         if (!time || !room) return;
 
         const hasBlock = !!cell.querySelector(".sg-block");
-        if (hasBlock) return; // main.js ya bloquea y avisa. aquí simplemente no crea.
+        if (hasBlock) return;
 
         if (!perms.canEdit()){
           perms.explainNoPerm("crear");
@@ -1232,6 +1422,9 @@ export function initCore(ctx){
     wireModalOnce();
     wireBackupOnce();
 
+    // ✅ Nuevo: mini CRUD de grupos (si existe en el HTML)
+    wireGroupMiniCrudOnce();
+
     applyFiltersAndRender({ force:true });
     subscribeGroupsOnce();
   }
@@ -1250,5 +1443,13 @@ export function initCore(ctx){
     showOnly,
     exportBackup,
     importBackupFromFile,
+
+    // (No necesario, pero útil si quieres abrirlo desde main.js)
+    _groupMini: {
+      open: groupModalOpen,
+      close: groupModalClose,
+      create: createGroupMini,
+      deleteSelected: deleteSelectedGroupMini,
+    }
   };
 }
