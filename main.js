@@ -7,11 +7,22 @@
 // ✅ Helpers SIEMPRE activos (hora pico siempre visible se fuerza en core)
 // ✅ Vista: Tablero / Lista (UI cableada, render depende del core)
 // -----------------------------------------------------------------------------
-// FIX CLAVE: Day tabs ahora llaman api.syncDayUI(d) con el día correcto
+// FIX CLAVE: Day tabs llaman api.syncDayUI(d) con el día correcto
 // EXTRA: Scroll en vista normal: wheel/trackpad SIEMPRE scrollea el tablero
-// EXTRA 2: Firestore error messages ahora muestran code+message (no “dijo que no”)
-// ✅ EXTRA 3 (NUEVO): Bloqueo de choques (si está ocupado, NO deja crear encima y avisa)
+// EXTRA 2: Firestore error messages muestran code+message (no “dijo que no”)
+// ✅ EXTRA 3: Bloqueo de choques (si está ocupado, NO deja crear encima y avisa)
 // -----------------------------------------------------------------------------
+//
+// Nota: Este archivo asume que horarios.core.js expone un API compatible con:
+// - reload({force})
+// - applyFiltersAndRender({force})
+// - syncDayUI(day)
+// - showOnly("grid"|"list")
+// - exportBackup()
+// - importBackupFromFile(event)
+//
+// -----------------------------------------------------------------------------
+
 
 'use strict';
 
@@ -43,9 +54,9 @@ const GROUPS_COLLECTION = "groups";
 const ALLOW_COLLISIONS_WITH_CONFIRM = false;
 
 // Días / Salones (se conservan)
-const DAYS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+const DAYS = Object.freeze(["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]);
 
-const ROOMS = [
+const ROOMS = Object.freeze([
   { key:"Salón 1",  short:"S1",  label:"Salón 1",  note:"Danzas/Teatro" },
   { key:"Salón 2",  short:"S2",  label:"Salón 2",  note:"Artes" },
   { key:"Salón 3",  short:"S3",  label:"Salón 3",  note:"Auditorio" },
@@ -56,15 +67,15 @@ const ROOMS = [
   { key:"Salón 8",  short:"S8",  label:"Salón 8",  note:"Música (batería)" },
   { key:"Salón 9",  short:"S9",  label:"Salón 9",  note:"Música (canto)" },
   { key:"Salón 10", short:"S10", label:"Salón 10", note:"Música (ensamble)" },
-];
+]);
 
 // Rangos horarios
 const PEAK_HOURS = new Set(["15:00","16:00","17:00","18:00","19:00"]);
-const BASE_SLOTS = [
+const BASE_SLOTS = Object.freeze([
   "07:00","08:00","09:00","10:00","11:00","12:00",
   "13:00","14:00","15:00","16:00","17:00","18:00",
   "19:00","20:00"
-];
+]);
 
 /* =========================
    DOM
@@ -145,6 +156,9 @@ const state = {
 
   // anti-spam
   _warnedListOnce: false,
+
+  // init flags
+  _booted: false,
 };
 
 /* =========================
@@ -293,16 +307,41 @@ const utils = {
   }
 };
 
+/* =========================
+   TOAST
+========================= */
 function toast(msg, type=""){
   const el = els.toast;
   if (!el) return;
   el.textContent = msg;
-  el.className = "toast show " + (type ? `toast-${type}` : "");
+
+  // types esperados por CSS: toast-warn / toast-danger
+  const cls = ["toast", "show"];
+  if (type) cls.push(`toast-${type}`);
+
+  el.className = cls.join(" ");
   clearTimeout(toast._t);
   toast._t = setTimeout(() => {
     el.className = "toast";
     el.textContent = "";
   }, 2600);
+}
+
+/* =========================
+   QUICK SANITY
+========================= */
+function sanityBoot(){
+  // Setea variables CSS útiles (rooms) si el CSS las usa
+  try{
+    document.documentElement.style.setProperty("--rooms", String(ROOMS.length));
+  }catch(_){}
+
+  if (!els.gridWrap) {
+    console.warn("[horarios] Falta #grid-wrap. El fullscreen nativo/UI puede comportarse raro.");
+  }
+  if (!els.grid && !els.list){
+    console.warn("[horarios] No se encontró schedule-grid ni schedule-list. Revisa IDs en HTML.");
+  }
 }
 
 /* =========================
@@ -318,11 +357,15 @@ function wireWheelToBoardScroll(){
 
   const getScroller = () =>
     document.querySelector(".schedule-scroll") ||
-    els.gridWrap?.querySelector?.(".schedule-scroll");
+    els.gridWrap?.querySelector?.(".schedule-scroll") ||
+    null;
 
   document.addEventListener("wheel", (e) => {
-    if (e.ctrlKey) return;              // ctrl+wheel = zoom
-    if (isEditable(e.target)) return;   // no joder inputs
+    // ctrl+wheel = zoom del browser, no lo tocamos
+    if (e.ctrlKey) return;
+
+    // no joder inputs/modals
+    if (isEditable(e.target)) return;
     if (e.target?.closest?.("#modal")) return;
 
     const scroller = getScroller();
@@ -342,7 +385,7 @@ function wireWheelToBoardScroll(){
 /* =========================
    Day tabs UI
 ========================= */
-function renderDayTabs(){
+function renderDayTabs(api){
   if (!els.dayTabs) return;
 
   els.dayTabs.innerHTML = "";
@@ -357,7 +400,7 @@ function renderDayTabs(){
     b.textContent = d;
 
     b.addEventListener("click", () => {
-      // ✅ FIX: siempre pasar el día al core
+      // ✅ FIX: siempre pasar el día al core si existe
       if (api?.syncDayUI){
         api.syncDayUI(d);
       } else {
@@ -387,7 +430,7 @@ function syncDayTabsUI(){
 /* =========================
    Vista (Tablero / Lista)
 ========================= */
-function applyViewUI(mode, opts={ silent:false }){
+function applyViewUI(api, mode, opts={ silent:false }){
   state.activeView = (mode === "list") ? "list" : "grid";
 
   if (els.viewGrid) els.viewGrid.checked = state.activeView === "grid";
@@ -438,7 +481,10 @@ function getNativeFullscreenElement(){
 async function tryNativeFullscreen(on){
   if (!isNativeFullscreenEnabled()) return;
 
-  const target = els.gridWrap || document.getElementById("grid-wrap") || document.documentElement;
+  const target =
+    els.gridWrap ||
+    document.getElementById("grid-wrap") ||
+    document.documentElement;
 
   try{
     if (on){
@@ -468,6 +514,7 @@ function wireFullscreen(){
 
   const onFsChange = () => {
     const isFs = !!getNativeFullscreenElement();
+    // Si salieron del fullscreen nativo (esc, ui del browser), apaga UI fullscreen
     if (!isFs && state.fullscreenOn){
       applyFullscreenUI(false);
     }
@@ -489,6 +536,7 @@ function wireFullscreen(){
    Body classes sync
 ========================= */
 function applyBodyModeClasses(){
+  // Helpers SIEMPRE true
   state.helpersOn = true;
   document.body.classList.toggle("helpers-on", true);
   document.body.classList.toggle("color-mode-area", state.colorMode !== "age");
@@ -545,36 +593,34 @@ const api = initCore(ctx);
    - No afecta click sobre un bloque (eso es editar).
 ============================================================================= */
 function wireCollisionBlocker(){
-  // Si alguien decide activar "permitir con confirm", este bloqueador no se mete.
   if (ALLOW_COLLISIONS_WITH_CONFIRM) return;
 
-  const getSlotCell = (target) => (
+  const gridEl = els.grid || document.getElementById("schedule-grid");
+  if (!gridEl) return;
+
+  const getCell = (target) => (
     target.closest?.(".sg-cell-slot") ||
     target.closest?.(".sg-cell") ||
-    target.closest?.("[data-room][data-time]")
+    target.closest?.("[data-room][data-time]") ||
+    null
   );
 
-  const isInsideGrid = (target) => {
-    const gridEl = els.grid || document.getElementById("schedule-grid");
-    return !!(gridEl && gridEl.contains(target));
-  };
-
   document.addEventListener("click", (e) => {
-    if (!isInsideGrid(e.target)) return;
+    // Solo dentro del tablero
+    if (!gridEl.contains(e.target)) return;
     if (e.target?.closest?.("#modal")) return;
 
-    // Si el click fue sobre un bloque, es editar. No estorbamos.
+    // Si clickea un bloque: editar, no estorbamos
     if (e.target?.closest?.(".sg-block")) return;
 
-    const cell = getSlotCell(e.target);
+    const cell = getCell(e.target);
     if (!cell) return;
 
-    // Necesitamos que sea un slot con room/time
     const room = cell.dataset?.room;
     const time = cell.dataset?.time;
     if (!room || !time) return;
 
-    // ¿Hay ya bloque(s)?
+    // ¿Hay ya bloque(s) en esa celda?
     const hasBlock = !!cell.querySelector(".sg-block");
     if (!hasBlock) return;
 
@@ -630,10 +676,10 @@ function wireEvents(){
 
   // Vista (radios)
   els.viewGrid?.addEventListener("change", () => {
-    if (els.viewGrid.checked) applyViewUI("grid");
+    if (els.viewGrid.checked) applyViewUI(api, "grid");
   });
   els.viewList?.addEventListener("change", () => {
-    if (els.viewList.checked) applyViewUI("list");
+    if (els.viewList.checked) applyViewUI(api, "list");
   });
 
   // Clear filters
@@ -661,40 +707,51 @@ function wireEvents(){
    INIT
 ========================= */
 function init(){
+  if (state._booted) return;
+  state._booted = true;
+
+  sanityBoot();
+
   utils.setInfo("Cargando…");
   utils.readFiltersFromURL();
 
+  // Sync color radios
   if (state.colorMode === "age"){
     if (els.colorByAge) els.colorByAge.checked = true;
   } else {
     if (els.colorByArea) els.colorByArea.checked = true;
   }
 
+  // Helpers SIEMPRE true + body classes
   state.helpersOn = true;
   applyBodyModeClasses();
 
-  renderDayTabs();
+  // Tabs día
+  renderDayTabs(api);
   syncDayTabsUI();
 
-  applyViewUI(state.activeView, { silent:true });
+  // Vista inicial (sin doble toast)
+  applyViewUI(api, state.activeView, { silent:true });
 
+  // Events + fullscreen + wheel
   wireEvents();
   wireFullscreen();
-
   wireWheelToBoardScroll();
 
   // ✅ Bloqueo de choques (UI)
   wireCollisionBlocker();
 
-  // Render inicial
+  // Render inicial (carga Firestore)
   api?.reload?.({ force:true });
 
+  // Fijar día actual
   if (api?.syncDayUI){
     api.syncDayUI(state.activeDay);
   } else {
     api?.applyFiltersAndRender?.({ force:true });
   }
 
+  // Fullscreen por URL
   if (state.fullscreenOn){
     applyFullscreenUI(true);
     tryNativeFullscreen(true);
