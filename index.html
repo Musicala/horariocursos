@@ -59,6 +59,78 @@
       color:#111827;
       box-shadow: 0 12px 30px rgba(17,24,39,.06);
     }
+
+    /* Mini layout helpers (solo para el panel de grupos, no invade tu CSS) */
+    .mini-actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:10px;
+      align-items:center;
+    }
+    .mini-actions .btn{ flex: 1 1 auto; }
+    .mini-note{
+      margin-top:10px;
+      font-size:12px;
+      color: rgba(17,24,39,.62);
+      line-height:1.35;
+    }
+
+    /* Modal simple para administrar grupos (si tu CSS ya tiene modal, esto solo ayuda a no verse feo) */
+    .modal-lite{
+      position: fixed;
+      inset: 0;
+      z-index: 9998;
+      display: none;
+    }
+    .modal-lite[aria-hidden="false"]{ display:block; }
+    .modal-lite__backdrop{
+      position:absolute; inset:0;
+      background: rgba(0,0,0,.22);
+    }
+    .modal-lite__card{
+      position: relative;
+      width: min(560px, calc(100vw - 24px));
+      margin: 40px auto;
+      background: #fff;
+      border-radius: 18px;
+      box-shadow: 0 24px 70px rgba(17,24,39,.22);
+      border: 1px solid rgba(17,24,39,.10);
+      overflow:hidden;
+    }
+    .modal-lite__header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(17,24,39,.08);
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(10px);
+    }
+    .modal-lite__body{ padding: 14px 16px; }
+    .modal-lite__footer{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      padding: 14px 16px;
+      border-top: 1px solid rgba(17,24,39,.08);
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(10px);
+    }
+    .modal-lite__grid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 520px){
+      .modal-lite__grid{ grid-template-columns: 1fr; }
+    }
+    .modal-lite__hint{
+      margin-top: 10px;
+      font-size: 12px;
+      color: rgba(17,24,39,.62);
+      line-height: 1.35;
+    }
   </style>
 </head>
 
@@ -92,7 +164,7 @@
     </div>
 
     <div class="actions" aria-label="Acciones">
-      <!-- Estado (antes estaba en page-head duplicado) -->
+      <!-- Estado -->
       <div id="results-info" class="results-info" aria-live="polite">—</div>
 
       <button id="btn-reload" class="btn small" type="button" title="Recargar datos">
@@ -127,19 +199,45 @@
       <!-- Sidebar izquierda -->
       <aside class="rail sidebar" id="sidebar" aria-label="Panel izquierdo">
 
+        <!-- ================= GRUPO ================= -->
         <div class="panel rail-card">
           <div class="rail-title">
             <strong>Grupo</strong>
             <span>Selector</span>
           </div>
+
           <div class="field">
             <label for="group-select">Selecciona un grupo</label>
             <select id="group-select">
               <option value="">Todos los grupos</option>
             </select>
+
+            <!-- Acciones mínimas para grupos -->
+            <div class="mini-actions" aria-label="Acciones de grupo">
+              <button
+                id="btn-group-add"
+                class="btn small"
+                type="button"
+                title="Crear un nuevo grupo en la colección groups"
+                aria-haspopup="dialog"
+                aria-controls="group-modal"
+              >+ Grupo</button>
+
+              <button
+                id="btn-group-delete"
+                class="btn small"
+                type="button"
+                title="Eliminar el grupo actualmente seleccionado"
+              >Eliminar</button>
+            </div>
+
+            <div class="mini-note">
+              Tip: si ves grupos repetidos, normalmente son documentos duplicados en Firestore. Sí, pasa. 🙃
+            </div>
           </div>
         </div>
 
+        <!-- ================= FILTROS ================= -->
         <div class="panel rail-card" aria-label="Filtros">
           <div class="rail-title">
             <strong>Filtros</strong>
@@ -228,6 +326,7 @@
           </div>
         </div>
 
+        <!-- ================= LEYENDA ================= -->
         <div class="panel rail-card" aria-label="Leyenda">
           <div class="rail-title">
             <strong>Leyenda</strong>
@@ -298,7 +397,7 @@
     </section>
   </main>
 
-  <!-- ================= MODAL (editor) ================= -->
+  <!-- ================= MODAL (editor de CLASES/BLOQUES) ================= -->
   <!-- IMPORTANTÍSIMO: inicia oculto con .hidden para que NO aparezca de primeras -->
   <div id="modal" class="modal hidden" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -316,6 +415,7 @@
               <option>Teatro</option>
               <option>Música</option>
               <option>Artes plásticas</option>
+              <option>Estimulación Artística</option>
             </select>
           </div>
 
@@ -373,6 +473,70 @@
         <div class="modal-actions">
           <button id="btn-delete" class="btn" type="button">Eliminar</button>
           <button id="btn-save" class="btn primary" type="button">Guardar</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= MODAL (ADMIN GRUPOS: crear/eliminar) ================= -->
+  <!-- Este modal es solo UI. El JS lo amarramos después. -->
+  <div id="group-modal" class="modal-lite" aria-hidden="true">
+    <div class="modal-lite__backdrop" data-close="group-modal" aria-hidden="true"></div>
+
+    <div class="modal-lite__card" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+      <header class="modal-lite__header">
+        <h2 id="group-modal-title" style="margin:0; font-size:16px;">Crear / Eliminar grupo</h2>
+        <button id="group-modal-close" class="icon-btn" type="button" aria-label="Cerrar" data-close="group-modal">✕</button>
+      </header>
+
+      <div class="modal-lite__body">
+        <div class="modal-lite__grid">
+          <div class="field">
+            <label for="g-enfoque">Enfoque</label>
+            <input id="g-enfoque" placeholder="Ej: Teatro, Piano, Urbano…" autocomplete="off" />
+          </div>
+
+          <div class="field">
+            <label for="g-edad">Edad / categoría</label>
+            <select id="g-edad">
+              <option value="">Selecciona…</option>
+              <option>Musibabies</option>
+              <option>Musicalitos</option>
+              <option>Musikids</option>
+              <option>Musiteens</option>
+              <option>Musigrandes</option>
+              <option>Musiadultos</option>
+            </select>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="g-clase">Área</label>
+            <select id="g-clase">
+              <option value="">Selecciona…</option>
+              <option value="Música">Música</option>
+              <option value="Danza">Danza</option>
+              <option value="Teatro">Teatro</option>
+              <option value="Artes plásticas">Artes plásticas</option>
+              <option value="Estimulación Artística">Estimulación Artística</option>
+            </select>
+          </div>
+        </div>
+
+        <p class="modal-lite__hint">
+          Esto crea/elimina documentos en <strong>Firestore → groups</strong>.
+          Si borras un grupo usado en horarios viejos, queda el “fantasma” del ID. Mejor borrar duplicados conscientes, no por impulso. 🧠
+        </p>
+      </div>
+
+      <footer class="modal-lite__footer">
+        <button id="btn-group-modal-delete" class="btn" type="button" title="Eliminar el grupo actualmente seleccionado en el dropdown">
+          Eliminar seleccionado
+        </button>
+        <div style="display:flex; gap:10px;">
+          <button id="btn-group-modal-cancel" class="btn small" type="button" data-close="group-modal">Cancelar</button>
+          <button id="btn-group-modal-save" class="btn primary small" type="button" title="Crear grupo con los campos de arriba">
+            Guardar
+          </button>
         </div>
       </footer>
     </div>
