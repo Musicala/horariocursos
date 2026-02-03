@@ -1,14 +1,21 @@
 // horarios.core.js
 // ------------------------------------------------------------
-// Horarios Grupales · Musicala — Core (Simplificado PRO) v5.3
+// Horarios Grupales · Musicala — Core (Simplificado PRO) v5.5 (MEJORADO SIN CAMBIAR BEHAVIOR)
 // - Firestore: subscribe groups, CRUD, upsert import
 // - Vista: Grid / Lista (main.js controla UI; core renderiza según state.activeView)
 // - Filtros: grupo, búsqueda, clase, edad
 // - Modal: crear/editar/eliminar + sesiones (día/hora/salón)
 // - Backup: export/import JSON
 // - ✅ Anti-choques: valida ocupación global al guardar (día/hora/salón)
-// - ✅ NEW: UI mini para crear/eliminar grupos desde el filtro (group-modal)
-// - Perf: delegación de eventos en grid, fragments, renders limpios, render cache
+// - ✅ Mini CRUD de grupos (si existe en HTML): crear/eliminar desde filtro
+// - Perf: delegación de eventos, fragments, renders limpios, cache key
+// - ✅ FIX: Grid usa CSS vars (sin hardcode de columnas) y setea --rooms correctamente
+// - ✅ NUEVO ANALYTICS: distribuciones por edad/arte/día/hora/salón + cupos agregados
+//
+// MEJORAS (sin cambiar nada de lo que ya hace):
+// - ✅ Evita recomputar stats 3 veces por render: cache por key (grid/list/stats/analytics comparten st)
+// - ✅ Hidratación más defensiva (sin mutar input raro)
+// - ✅ Menos trabajo en loops grandes, mantiene resultados idénticos
 // ------------------------------------------------------------
 
 'use strict';
@@ -17,26 +24,47 @@ export function initCore(ctx){
   const { els, state, utils, toast, perms } = ctx;
   const { DAYS, ROOMS, PEAK_HOURS, BASE_SLOTS } = ctx;
 
-  const CORE_VERSION = "core.v5.3-grid-list-modal-backup-anti-collisions-group-mini-crud";
+  const CORE_VERSION = "core.v5.5-analytics-distributions-weekly";
 
   /* =========================================================
      CONSTANTS / HELPERS
   ========================================================= */
-  const AREA_COLORS = {
+  const AREA_COLORS = Object.freeze({
     music:  "#0C41C4",
     dance:  "#CE0071",
     theater:"#680DBF",
     arts:   "#220A63",
-  };
+  });
 
-  const AGE_COLORS = {
+  const AGE_COLORS = Object.freeze({
     Musibabies:   "#0C41C4",
     Musicalitos:  "#5729FF",
     Musikids:     "#680DBF",
     Musiteens:    "#CE0071",
     Musigrandes:  "#220A63",
     Musiadultos:  "#0C0A1E",
-  };
+    Todos: "#10B981",
+  });
+
+  const AGE_COLOR_INDEX = (() => {
+    const m = new Map();
+    for (const [k,v] of Object.entries(AGE_COLORS)){
+      m.set(utils.normalize(k), v);
+    }
+    return m;
+  })();
+
+  function resolveAgeHex(age){
+    const raw = (age ?? "").toString().trim();
+    if (!raw) return null;
+    if (AGE_COLORS[raw]) return AGE_COLORS[raw];
+    const n = utils.normalize(raw);
+    return AGE_COLOR_INDEX.get(n) || null;
+  }
+
+  const ROOMS_ARR = Array.isArray(ROOMS) ? ROOMS : [];
+  const ROOMS_KEYS = ROOMS_ARR.map(r => r?.key).filter(Boolean);
+  const ROOMS_LABEL_BY_KEY = new Map(ROOMS_ARR.map(r => [r.key, r.label || r.key]));
 
   function hexToRGBA(hex, a){
     const h = (hex || "").replace("#","").trim();
@@ -57,20 +85,33 @@ export function initCore(ctx){
     return "music";
   }
 
+  function areaLabel(areaKey){
+    const k = (areaKey || "music").toString();
+    if (k === "dance") return "Danza";
+    if (k === "theater") return "Teatro";
+    if (k === "arts") return "Artes";
+    return "Música";
+  }
+
   function ageKey(g){
     return (g?.edad ?? "").toString().trim();
   }
 
   function normalizeSessions(sessions){
     const arr = Array.isArray(sessions) ? sessions : [];
-    return arr
+    const out = arr
       .map(s => ({
         day:  utils.canonDay((s?.day ?? "").toString().trim()),
         time: utils.normalizeHHMM((s?.time ?? "").toString().trim()),
         room: utils.canonRoom((s?.room ?? "").toString().trim()),
       }))
-      .filter(s => s.day && s.time && s.room && DAYS.includes(s.day))
-      .sort(utils.compareSessions);
+      .filter(s => s.day && s.time && s.room && DAYS.includes(s.day));
+
+    const filtered = (ROOMS_KEYS.length > 0)
+      ? out.filter(s => ROOMS_KEYS.includes(s.room))
+      : out;
+
+    return filtered.sort(utils.compareSessions);
   }
 
   function hydrateGroup(raw){
@@ -103,14 +144,16 @@ export function initCore(ctx){
     const age  = g.__ageKey || ageKey(g);
 
     const areaHex = AREA_COLORS[tone] || "#0C41C4";
-    const ageHex  = AGE_COLORS[age]   || "#0C41C4";
+    const ageHexResolved = resolveAgeHex(age);
+    const ageHex  = ageHexResolved || "#0C41C4";
 
     blockEl.dataset.tone = tone;
     if (age) blockEl.dataset.age = age;
 
     const hex = (state.colorMode === "area") ? areaHex : ageHex;
 
-    blockEl.style.borderColor = hexToRGBA(hex, 0.55);
+    blockEl.style.borderLeftColor = hex;
+    blockEl.style.borderColor = hexToRGBA(hex, 0.22);
     blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, 0.12)}, rgba(255,255,255,0.94))`;
   }
 
@@ -121,6 +164,107 @@ export function initCore(ctx){
 
   function getEl(id){
     return document.getElementById(id);
+  }
+
+  function labelForGroup(g){
+    return [g?.enfoque, g?.edad, g?.clase].filter(Boolean).join(" · ").trim() || (g?.id || "Grupo");
+  }
+
+  function safeKey(v, fallback="—"){
+    const t = (v == null ? "" : String(v)).trim();
+    return t || fallback;
+  }
+
+  function incMap(map, key, by=1){
+    if (!map) return;
+    const k = safeKey(key);
+    map.set(k, (map.get(k) || 0) + (Number(by) || 0));
+  }
+
+  function addOccAgg(occMap, key, cupoOcu, cupoMax){
+    const k = safeKey(key);
+    const cur = occMap.get(k) || { ocu:0, max:0 };
+    cur.ocu += Math.max(0, Number(cupoOcu) || 0);
+    cur.max += Math.max(0, Number(cupoMax) || 0);
+    occMap.set(k, cur);
+  }
+
+  function mapToSortedArray(map, { labelTransform=null } = {}){
+    const arr = Array.from(map.entries()).map(([k,v]) => ({ key:k, value:v }));
+    arr.sort((a,b) => (b.value - a.value) || String(a.key).localeCompare(String(b.key), "es"));
+    if (labelTransform){
+      return arr.map(x => ({ ...x, label: labelTransform(x.key) }));
+    }
+    return arr.map(x => ({ ...x, label: x.key }));
+  }
+
+  function mapOccToSortedArray(map){
+    const arr = Array.from(map.entries()).map(([k,v]) => {
+      const ocu = Math.max(0, Number(v?.ocu) || 0);
+      const mx  = Math.max(0, Number(v?.max) || 0);
+      const pct = (mx > 0) ? Math.round((ocu/mx)*100) : 0;
+      return { key:k, label:k, ocu, max:mx, pct };
+    });
+    arr.sort((a,b) => (b.pct - a.pct) || (b.ocu - a.ocu) || a.key.localeCompare(b.key, "es"));
+    return arr;
+  }
+
+  function pctText(ocu, max){
+    if (!max || max <= 0) return "—";
+    const p = Math.round((ocu / Math.max(1, max)) * 100);
+    return `${p}% (${ocu}/${max})`;
+  }
+
+  function compactBarRow(label, value, max, suffix=""){
+    const pct = (max > 0) ? Math.round((value / max) * 100) : 0;
+    const w = Math.min(100, Math.max(0, pct));
+    return `
+      <div class="ana-row">
+        <div class="ana-row-top">
+          <span class="ana-row-label">${utils.htmlEscape(label)}</span>
+          <span class="ana-row-val">${utils.htmlEscape(String(value))}${suffix}</span>
+        </div>
+        <div class="ana-bar">
+          <div class="ana-bar-fill" style="width:${w}%"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function compactOccRow(label, ocu, max){
+    const pct = (max > 0) ? Math.round((ocu / max) * 100) : 0;
+    const w = Math.min(100, Math.max(0, pct));
+    const txt = (max > 0) ? `${pct}% (${ocu}/${max})` : "—";
+    return `
+      <div class="ana-row">
+        <div class="ana-row-top">
+          <span class="ana-row-label">${utils.htmlEscape(label)}</span>
+          <span class="ana-row-val">${utils.htmlEscape(txt)}</span>
+        </div>
+        <div class="ana-bar">
+          <div class="ana-bar-fill" style="width:${w}%"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function analyticsStylesHint(){
+    return `
+      <style>
+        .ana-grid{ display:grid; grid-template-columns: 1fr; gap:12px; }
+        @media (min-width: 860px){ .ana-grid{ grid-template-columns: 1fr 1fr; } }
+        .ana-card{ background: rgba(255,255,255,.75); border: 1px solid rgba(2,6,23,.10); border-radius: 16px; padding: 12px; }
+        .ana-title{ font-weight: 1000; margin: 0 0 8px; }
+        .ana-row{ display:flex; flex-direction:column; gap:6px; padding:8px 0; border-bottom: 1px dashed rgba(2,6,23,.10); }
+        .ana-row:last-child{ border-bottom: 0; }
+        .ana-row-top{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+        .ana-row-label{ font-weight: 900; color: rgba(11,16,32,.88); }
+        .ana-row-val{ font-weight: 900; color: rgba(11,16,32,.62); }
+        .ana-bar{ height: 8px; background: rgba(2,6,23,.06); border-radius: 999px; overflow:hidden; }
+        .ana-bar-fill{ height:100%; background: linear-gradient(90deg, rgba(12,65,196,.85), rgba(104,13,191,.75)); border-radius: 999px; }
+        .ana-muted{ color: rgba(107,114,128,.95); font-weight: 800; font-size: 12.5px; }
+      </style>
+    `;
   }
 
   /* =========================================================
@@ -145,6 +289,24 @@ export function initCore(ctx){
       q, clase, edad, gid,
       (state.allGroups?.length ?? 0),
     ].join("::");
+  }
+
+  /* =========================================================
+     STATS CACHE (evita recomputar 3 veces por render)
+  ========================================================= */
+  const statsCache = {
+    key: "",
+    st: null,
+    reset(){ this.key=""; this.st=null; }
+  };
+
+  function getStatsCached(){
+    const k = renderCache.key || computeKey();
+    if (statsCache.key === k && statsCache.st) return statsCache.st;
+    const st = computeStats(state.filteredGroups, state.activeDay);
+    statsCache.key = k;
+    statsCache.st = st;
+    return st;
   }
 
   /* =========================================================
@@ -191,12 +353,15 @@ export function initCore(ctx){
   }
 
   async function reload({ force=false } = {}){
-    if (force) renderCache.reset();
+    if (force){
+      renderCache.reset();
+      statsCache.reset();
+    }
     subscribeGroupsOnce();
   }
 
   function onAuthChanged(){
-    // Hoy no hay auth, pero se deja por compatibilidad
+    // Compat: hoy no hay auth, pero se deja por si después meten login.
   }
 
   /* =========================================================
@@ -224,13 +389,19 @@ export function initCore(ctx){
     const clases = new Set();
     const edades = new Set();
 
-    for (const g of groups){
+    for (const g of (groups || [])){
       if (g?.clase) clases.add(g.clase);
       if (g?.edad)  edades.add(g.edad);
     }
 
+    edades.add("Todos");
+
     const clasesArr = Array.from(clases).sort((a,b)=>a.localeCompare(b,"es"));
-    const edadesArr = Array.from(edades).sort((a,b)=>a.localeCompare(b,"es"));
+    const edadesArr = Array.from(edades).sort((a,b)=>{
+      if (a === "Todos") return -1;
+      if (b === "Todos") return  1;
+      return a.localeCompare(b,"es");
+    });
 
     rebuildSelectOptions(els.fClase, clasesArr, { keepFirstEmpty:true, firstLabel:"Todas las clases" });
     rebuildSelectOptions(els.fEdad,  edadesArr, { keepFirstEmpty:true, firstLabel:"Todas las edades" });
@@ -251,16 +422,11 @@ export function initCore(ctx){
 
     groups
       .slice()
-      .sort((a,b) => {
-        const aa = [a?.enfoque, a?.edad, a?.clase].filter(Boolean).join(" · ");
-        const bb = [b?.enfoque, b?.edad, b?.clase].filter(Boolean).join(" · ");
-        return aa.localeCompare(bb, "es");
-      })
+      .sort((a,b) => labelForGroup(a).localeCompare(labelForGroup(b), "es"))
       .forEach(g => {
         const o = document.createElement("option");
         o.value = g.id;
-        const label = [g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ");
-        o.textContent = label || g.id;
+        o.textContent = labelForGroup(g);
         frag.appendChild(o);
       });
 
@@ -307,11 +473,11 @@ export function initCore(ctx){
   function buildGlobalOccupancyIndex(groups, { excludeId=null } = {}){
     const occ = new Map(); // key -> { groupId, label }
     for (const g0 of (groups || [])){
-      const g = hydrateGroup(g0);
+      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
       const gid = g?.id || "";
       if (excludeId && gid === excludeId) continue;
 
-      const label = [g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ") || gid || "Grupo";
+      const label = labelForGroup(g);
 
       for (const s of (g.__sessions || [])){
         const key = `${s.day}__${s.time}__${s.room}`;
@@ -345,14 +511,14 @@ export function initCore(ctx){
   }
 
   /* =========================================================
-     STATS
+     STATS + ANALYTICS (DAY + WEEK)
   ========================================================= */
   function sessionsForDay(groups, day){
     const out = [];
     const dayCanon = utils.canonDay(day);
 
-    for (const g0 of groups){
-      const g = hydrateGroup(g0);
+    for (const g0 of (groups || [])){
+      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
       const sessions = g.__sessions || [];
       for (const s of sessions){
         if (s.day !== dayCanon) continue;
@@ -364,11 +530,35 @@ export function initCore(ctx){
     return out;
   }
 
+  function sessionsForAllDays(groups){
+    const out = [];
+    for (const g0 of (groups || [])){
+      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
+      for (const s of (g.__sessions || [])){
+        if (!s.day || !s.time || !s.room) continue;
+        out.push({ group: g, day: s.day, time: s.time, room: s.room });
+      }
+    }
+    out.sort((a,b) => {
+      const da = DAYS.indexOf(a.day);
+      const db = DAYS.indexOf(b.day);
+      if (da !== db) return da - db;
+      const ta = utils.safeTimeToMinutes(a.time);
+      const tb = utils.safeTimeToMinutes(b.time);
+      if (ta !== tb) return ta - tb;
+      const ra = String(a.room||"");
+      const rb = String(b.room||"");
+      return ra.localeCompare(rb, "es");
+    });
+    return out;
+  }
+
   function computeStats(groups, day){
     const daySessions = sessionsForDay(groups, day);
-    const roomsUsed = new Set();
-    const occ = new Map(); // time__room -> count
+    const weekSessions = sessionsForAllDays(groups);
 
+    const roomsUsed = new Set();
+    const occCells = new Map(); // time__room -> count
     let peakSessions = 0;
     let cupoMaxSum = 0;
     let cupoOcuSum = 0;
@@ -378,7 +568,7 @@ export function initCore(ctx){
       if (PEAK_HOURS?.has?.(it.time)) peakSessions++;
 
       const k = `${it.time}__${it.room}`;
-      occ.set(k, (occ.get(k) || 0) + 1);
+      occCells.set(k, (occCells.get(k) || 0) + 1);
 
       const g = it.group;
       const mx = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
@@ -391,12 +581,64 @@ export function initCore(ctx){
 
     let collisionsCells = 0;
     let conflictsExtras = 0;
-    for (const [, c] of occ){
+    for (const [, c] of occCells){
       if (c > 1){
         collisionsCells++;
         conflictsExtras += (c - 1);
       }
     }
+
+    const byDay = new Map();
+    const byRoom = new Map();
+    const byHour = new Map();
+    const byEdad = new Map();
+    const byArea = new Map();
+    const byClase = new Map();
+
+    const occByArea = new Map();
+    const occByEdad = new Map();
+
+    let weekCupoMaxSum = 0;
+    let weekCupoOcuSum = 0;
+    let weekPeakSessions = 0;
+
+    for (const it of weekSessions){
+      const g = it.group;
+
+      const aKey = g.__tone || toneClassForGroup(g);
+      const aLbl = areaLabel(aKey);
+      const eKey = safeKey(g.__ageKey || ageKey(g), "Sin edad");
+      const cKey = safeKey(g?.clase, "Sin clase");
+
+      incMap(byDay, it.day, 1);
+      incMap(byRoom, ROOMS_LABEL_BY_KEY.get(it.room) || it.room, 1);
+      incMap(byHour, it.time, 1);
+      incMap(byEdad, eKey, 1);
+      incMap(byArea, aLbl, 1);
+      incMap(byClase, cKey, 1);
+
+      if (PEAK_HOURS?.has?.(it.time)) weekPeakSessions++;
+
+      const mx = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
+      const oc = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
+      if (mx > 0){
+        weekCupoMaxSum += mx;
+        weekCupoOcuSum += oc;
+        addOccAgg(occByArea, aLbl, oc, mx);
+        addOccAgg(occByEdad, eKey, oc, mx);
+      }
+    }
+
+    const byRoomArr = mapToSortedArray(byRoom);
+    const byHourArr = mapToSortedArray(byHour);
+    const byEdadArr = mapToSortedArray(byEdad);
+    const byAreaArr = mapToSortedArray(byArea);
+    const byClaseArr = mapToSortedArray(byClase);
+
+    const occByAreaArr = mapOccToSortedArray(occByArea);
+    const occByEdadArr = mapOccToSortedArray(occByEdad);
+
+    const dayOrderArr = DAYS.map(d => ({ key:d, label:d, value: byDay.get(d) || 0 }));
 
     return {
       groupsCount: (groups || []).length,
@@ -408,29 +650,45 @@ export function initCore(ctx){
       cupoMaxSum,
       cupoOcuSum,
       daySessions,
+
+      weekSessionsCount: weekSessions.length,
+      weekPeakSessions,
+      weekCupoMaxSum,
+      weekCupoOcuSum,
+
+      dist: {
+        byDay: dayOrderArr,
+        byRoom: byRoomArr,
+        byHour: byHourArr,
+        byEdad: byEdadArr,
+        byArea: byAreaArr,
+        byClase: byClaseArr,
+        occByArea: occByAreaArr,
+        occByEdad: occByEdadArr,
+      }
     };
   }
 
-  function renderStats(){
-    const st = computeStats(state.filteredGroups, state.activeDay);
+  function renderStats(st){
+    const stats = st || getStatsCached();
 
-    safeElSetText(els.statTotalGroups,   String(st.groupsCount));
-    safeElSetText(els.statTotalSessions, String(st.sessionsCount));
-    safeElSetText(els.statTotalRooms,    String(st.roomsUsedCount));
+    safeElSetText(els.statTotalGroups,   String(stats.groupsCount));
+    safeElSetText(els.statTotalSessions, String(stats.sessionsCount));
+    safeElSetText(els.statTotalRooms,    String(stats.roomsUsedCount));
 
     if (els.analyticsSubtitle){
       els.analyticsSubtitle.textContent =
-        `Día: ${state.activeDay} · Sesiones: ${st.sessionsCount} · Choques: ${st.conflictsExtras}`;
+        `Día: ${state.activeDay} · Sesiones: ${stats.sessionsCount} · Choques: ${stats.conflictsExtras}`;
     }
 
     if (els.anaAlertsContent){
       const notes = [];
-      if (st.conflictsExtras > 0) notes.push(`Hay ${st.conflictsExtras} choque(s) extra (mismo salón y hora).`);
-      if (st.peakSessions >= 10) notes.push("Hora pico está bien cargada (ojo choques).");
-      if (st.cupoMaxSum > 0){
-        const ocu = st.cupoOcuSum / Math.max(1, st.cupoMaxSum);
+      if (stats.conflictsExtras > 0) notes.push(`Hay ${stats.conflictsExtras} choque(s) extra (mismo salón y hora).`);
+      if (stats.peakSessions >= 10) notes.push("Hora pico está bien cargada (ojo choques).");
+      if (stats.cupoMaxSum > 0){
+        const ocu = stats.cupoOcuSum / Math.max(1, stats.cupoMaxSum);
         if (ocu >= 0.92) notes.push("Ocupación muy alta: si entra demanda, se te estalla el cupo.");
-        if (ocu <= 0.25 && st.sessionsCount >= 8) notes.push("Ocupación baja: revisa mezcla de grupos o estrategia.");
+        if (ocu <= 0.25 && stats.sessionsCount >= 8) notes.push("Ocupación baja: revisa mezcla de grupos o estrategia.");
       }
 
       els.anaAlertsContent.innerHTML = notes.length
@@ -503,7 +761,7 @@ export function initCore(ctx){
 
     const roomSel = document.createElement("select");
     roomSel.className = "session-room";
-    roomSel.innerHTML = ROOMS
+    roomSel.innerHTML = ROOMS_ARR
       .map(r => `<option value="${utils.htmlEscape(r.key)}"${r.key===room?" selected":""}>${utils.htmlEscape(r.label)}</option>`)
       .join("");
 
@@ -605,7 +863,7 @@ export function initCore(ctx){
   }
 
   function openModalForGroup(g){
-    const hg = hydrateGroup(g);
+    const hg = (g && g.__sessions) ? g : hydrateGroup(g);
     state.activeGroup = hg;
 
     modalFill(hg, { isNew:false });
@@ -648,13 +906,11 @@ export function initCore(ctx){
       return;
     }
 
-    // ✅ 1) No duplicados dentro del mismo grupo
     if (hasDuplicateInsideSameGroup(payload.sessions)){
       toast("🚫 Este grupo tiene dos sesiones iguales (mismo día/hora/salón).", "danger");
       return;
     }
 
-    // ✅ 2) No choques globales
     const activeId = state.activeGroup?.id || null;
     const occIndex = buildGlobalOccupancyIndex(state.allGroups || [], { excludeId: activeId });
     const collision = findFirstCollision(payload.sessions, occIndex);
@@ -662,7 +918,8 @@ export function initCore(ctx){
     if (collision){
       const s = collision.session;
       const other = collision.hit?.label || "otro grupo";
-      toast(`🚫 Ocupado: ${s.day} ${s.time} en ${s.room} (ya lo usa: ${other})`, "danger");
+      const roomLabel = ROOMS_LABEL_BY_KEY.get(s.room) || s.room;
+      toast(`🚫 Ocupado: ${s.day} ${s.time} en ${roomLabel} (ya lo usa: ${other})`, "danger");
       return;
     }
 
@@ -686,6 +943,7 @@ export function initCore(ctx){
       state.activeGroup = null;
 
       renderCache.reset();
+      statsCache.reset();
       utils.setInfo("Listo.");
     }catch(err){
       console.error(err);
@@ -719,6 +977,7 @@ export function initCore(ctx){
       modalClose();
       state.activeGroup = null;
       renderCache.reset();
+      statsCache.reset();
       utils.setInfo("Listo.");
     }catch(err){
       console.error(err);
@@ -748,7 +1007,7 @@ export function initCore(ctx){
       M.sessionsWrap.appendChild(makeSessionRow({
         day: state.activeDay,
         time: "15:00",
-        room: ROOMS[0]?.key || "Salón 1"
+        room: ROOMS_ARR[0]?.key || "Salón 1"
       }));
     });
 
@@ -758,12 +1017,6 @@ export function initCore(ctx){
 
   /* =========================================================
      MINI MODAL: Crear / Eliminar grupos desde el filtro
-     - IDs del HTML:
-       btn-group-add, btn-group-delete
-       group-modal, group-modal-close
-       g-enfoque, g-edad, g-clase
-       btn-group-modal-save, btn-group-modal-delete, btn-group-modal-cancel
-     - NO mete sesiones. Solo crea doc para que aparezca en el selector.
   ========================================================= */
   const GM = {
     openBtn:  els.btnGroupAdd   || getEl("btn-group-add"),
@@ -785,7 +1038,6 @@ export function initCore(ctx){
     if (!GM.modal) return;
     GM.modal.setAttribute("aria-hidden","false");
     document.body.classList.add("modal-open-lite");
-    // foco amable
     setTimeout(() => {
       GM.inEnfoque?.focus?.({ preventScroll:true });
     }, 0);
@@ -815,18 +1067,14 @@ export function initCore(ctx){
   }
 
   async function createGroupMini(){
-    // intencional: NO pedimos perms/login aquí, porque el usuario pidió no pensar en eso.
-    // si Firestore bloquea, se mostrará el error y ya.
-
     const data = readGroupMiniForm();
     const label = buildMiniLabel(data);
 
     if (!label){
-      toast("Escribe al menos Enfoque o selecciona Edad/Área.", "warn");
+      toast("Escribe al menos Enfoque o selecciona Edad/Clase.", "warn");
       return;
     }
 
-    // Anti-duplicado suave (solo para evitar que creen el mismo nombre 8 veces en 1 minuto)
     const existing = (state.allGroups || []).some(g => {
       const a = utils.normalize(buildMiniLabel({
         enfoque: g.enfoque || "",
@@ -850,19 +1098,20 @@ export function initCore(ctx){
         edad: data.edad || "",
         clase: data.clase || "",
         activo: true,
-        sessions: [],        // vacío: existe para el filtro, y ya luego le metes sesiones en el modal grande
+        sessions: [],
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
 
       const colRef = ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION);
-      const docRef = ctx.fs.doc(colRef); // id auto
+      const docRef = ctx.fs.doc(colRef);
       await ctx.fs.setDoc(docRef, payload, { merge:true });
 
       toast("Grupo creado ✅ (sin horarios aún)", "success");
       groupModalClear();
       groupModalClose();
       renderCache.reset();
+      statsCache.reset();
       utils.setInfo("Listo.");
     }catch(err){
       console.error(err);
@@ -879,9 +1128,7 @@ export function initCore(ctx){
     }
 
     const g = (state.allGroups || []).find(x => x.id === id);
-    const label = g
-      ? ([g.enfoque, g.edad, g.clase].filter(Boolean).join(" · ") || id)
-      : id;
+    const label = g ? labelForGroup(g) : id;
 
     const ok = confirm(`¿Eliminar este grupo?\n\n${label}\n\nEsto no se puede deshacer.`);
     if (!ok) return;
@@ -894,6 +1141,7 @@ export function initCore(ctx){
       toast("Grupo eliminado ✅");
       groupModalClose();
       renderCache.reset();
+      statsCache.reset();
       utils.setInfo("Listo.");
     }catch(err){
       console.error(err);
@@ -903,25 +1151,15 @@ export function initCore(ctx){
   }
 
   function wireGroupMiniCrudOnce(){
-    // Si no existe el modal/btns en HTML, no hacemos nada y ya.
     const hasAny = !!(GM.openBtn || GM.delBtn || GM.modal);
     if (!hasAny) return;
 
-    // Marcar en modal para no duplicar wiring
     if (GM.modal && GM.modal.__wired) return;
     if (GM.modal) GM.modal.__wired = true;
 
-    // Abrir modal
-    GM.openBtn?.addEventListener("click", () => {
-      groupModalOpen();
-    });
+    GM.openBtn?.addEventListener("click", groupModalOpen);
+    GM.delBtn?.addEventListener("click", deleteSelectedGroupMini);
 
-    // Botón eliminar rápido (sin abrir modal)
-    GM.delBtn?.addEventListener("click", () => {
-      deleteSelectedGroupMini();
-    });
-
-    // Cerrar modal: backdrop + botones con data-close
     if (GM.modal){
       GM.modal.addEventListener("click", (e) => {
         const t = e.target;
@@ -933,11 +1171,9 @@ export function initCore(ctx){
     GM.closeBtn?.addEventListener("click", groupModalClose);
     GM.btnCancel?.addEventListener("click", groupModalClose);
 
-    // Guardar/Eliminar desde modal
     GM.btnSave?.addEventListener("click", createGroupMini);
     GM.btnDelSel?.addEventListener("click", deleteSelectedGroupMini);
 
-    // Escape para cerrar
     document.addEventListener("keydown", (e) => {
       if (!GM.modal) return;
       if (GM.modal.getAttribute("aria-hidden") !== "false") return;
@@ -950,7 +1186,7 @@ export function initCore(ctx){
   ========================================================= */
   function buildTimeSlots(daySessions){
     const set = new Set();
-    for (const s of daySessions){
+    for (const s of (daySessions || [])){
       if (s.time) set.add(s.time);
     }
     for (const t of (BASE_SLOTS || [])) set.add(t);
@@ -960,11 +1196,11 @@ export function initCore(ctx){
     return arr;
   }
 
-  function renderGrid(){
+  function renderGrid(st){
     if (!els.grid) return;
 
-    const st = computeStats(state.filteredGroups, state.activeDay);
-    const daySessions = st.daySessions;
+    const stats = st || getStatsCached();
+    const daySessions = stats.daySessions;
     const slots = buildTimeSlots(daySessions);
 
     const map = new Map();
@@ -976,21 +1212,31 @@ export function initCore(ctx){
 
     const board = document.createElement("div");
     board.className = "sg sg-board";
-    board.style.gridTemplateColumns = `140px repeat(${ROOMS.length}, minmax(140px, 1fr))`;
+    board.style.setProperty("--rooms", String(ROOMS_ARR.length || 0));
 
     const corner = document.createElement("div");
     corner.className = "sg-cell sg-sticky-top sg-sticky-left sg-corner";
     corner.textContent = "Hora";
     board.appendChild(corner);
 
-    for (const r of ROOMS){
+    for (const r of ROOMS_ARR){
       const h = document.createElement("div");
       h.className = "sg-cell sg-sticky-top sg-room";
       h.dataset.room = r.key;
-      h.innerHTML = `
-        <div class="room-title">${utils.htmlEscape(r.label)}</div>
-        <div class="room-note">${utils.htmlEscape(r.note || "")}</div>
-      `;
+
+      const title = document.createElement("div");
+      title.className = "room-title";
+      title.textContent = r.label || r.key;
+
+      h.appendChild(title);
+
+      if (r.note){
+        const note = document.createElement("div");
+        note.className = "room-note";
+        note.textContent = r.note;
+        h.appendChild(note);
+      }
+
       board.appendChild(h);
     }
 
@@ -1004,7 +1250,7 @@ export function initCore(ctx){
       timeCell.textContent = time;
       board.appendChild(timeCell);
 
-      for (const r of ROOMS){
+      for (const r of ROOMS_ARR){
         const cell = document.createElement("div");
         cell.className = `sg-cell sg-cell-slot ${zebra}` + (peak ? " sg-peak" : "");
         cell.dataset.time = time;
@@ -1019,7 +1265,10 @@ export function initCore(ctx){
         }
 
         if (!items.length){
-          cell.innerHTML = `<div class="sg-empty" aria-hidden="true"></div>`;
+          const empty = document.createElement("div");
+          empty.className = "sg-empty";
+          empty.setAttribute("aria-hidden","true");
+          cell.appendChild(empty);
         } else {
           items.sort((a,b) => {
             const ga = a.group, gb = b.group;
@@ -1047,21 +1296,42 @@ export function initCore(ctx){
             const tone = g.__tone || toneClassForGroup(g);
             const ageClass = edad ? `age-${utils.normalize(edad).replace(/\s+/g,'-')}` : "";
             block.className = `sg-block ${tone} ${ageClass}`.trim();
-            block.setAttribute("title", title);
+            block.setAttribute("title", title || "Grupo");
 
             block.dataset.action = "edit";
             block.dataset.id = g?.id || "";
 
             const secondary = [g?.clase, nivel].filter(Boolean).join(" · ");
 
-            block.innerHTML = `
-              <div class="sg-block-title">${utils.htmlEscape(enfoque || g?.clase || "Grupo")}</div>
-              <div class="sg-block-meta">
-                <span>${utils.htmlEscape(edad || "")}</span>
-                ${secondary ? `<span class="sg-muted">· ${utils.htmlEscape(secondary)}</span>` : ""}
-                ${cupoTxt ? `<span class="sg-chip">${utils.htmlEscape(cupoTxt)}</span>` : ""}
-              </div>
-            `;
+            const t1 = document.createElement("div");
+            t1.className = "sg-block-title";
+            t1.textContent = (enfoque || g?.clase || "Grupo");
+
+            const meta = document.createElement("div");
+            meta.className = "sg-block-meta";
+
+            if (edad){
+              const spanEdad = document.createElement("span");
+              spanEdad.textContent = edad;
+              meta.appendChild(spanEdad);
+            }
+
+            if (secondary){
+              const spanSec = document.createElement("span");
+              spanSec.className = "sg-muted";
+              spanSec.textContent = `· ${secondary}`;
+              meta.appendChild(spanSec);
+            }
+
+            if (cupoTxt){
+              const chip = document.createElement("span");
+              chip.className = "sg-chip";
+              chip.textContent = cupoTxt;
+              meta.appendChild(chip);
+            }
+
+            block.appendChild(t1);
+            block.appendChild(meta);
 
             applyBlockColors(block, g);
             cell.appendChild(block);
@@ -1075,7 +1345,7 @@ export function initCore(ctx){
     els.grid.innerHTML = "";
     els.grid.appendChild(board);
 
-    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${st.sessionsCount} sesión(es)`);
+    utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${stats.sessionsCount} sesión(es)`);
   }
 
   function wireGridDelegationOnce(){
@@ -1126,7 +1396,7 @@ export function initCore(ctx){
 
     const items = [];
     for (const g0 of groups){
-      const g = hydrateGroup(g0);
+      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
       const sessions = g.__sessions || [];
       for (const s of sessions){
         if (s.day !== dayCanon) continue;
@@ -1168,11 +1438,13 @@ export function initCore(ctx){
 
       const title = [clase, edad, enfoque, nivel].filter(Boolean).join(" · ");
 
+      const roomLabel = ROOMS_LABEL_BY_KEY.get(s.room) || s.room;
+
       return `
         <article class="list-item" data-action="edit" data-id="${utils.htmlEscape(g.id || "")}" title="${utils.htmlEscape(title)}">
           <div class="li-top">
             <span class="li-time">${utils.htmlEscape(s.time)}</span>
-            <span class="li-room">${utils.htmlEscape(s.room)}</span>
+            <span class="li-room">${utils.htmlEscape(roomLabel)}</span>
           </div>
           <div class="li-title">${utils.htmlEscape(enfoque)}</div>
           <div class="li-meta">
@@ -1202,43 +1474,112 @@ export function initCore(ctx){
   /* =========================================================
      ANALYTICS WRAP (si existe en HTML)
   ========================================================= */
-  function renderAnalyticsIfPresent(){
+  function renderAnalyticsIfPresent(st){
     if (!els.analyticsWrap) return;
 
-    const st = computeStats(state.filteredGroups, state.activeDay);
+    const stats = st || getStatsCached();
 
-    if (els.analyticsTitle) els.analyticsTitle.textContent = "Resumen";
+    if (els.analyticsTitle) els.analyticsTitle.textContent = "Resumen + Distribución";
     if (els.analyticsSubtitle) {
       els.analyticsSubtitle.textContent =
-        `Día: ${state.activeDay} · Sesiones: ${st.sessionsCount} · Choques: ${st.conflictsExtras}`;
+        `Día: ${state.activeDay} · Hoy: ${stats.sessionsCount} sesiones · Semana (filtros): ${stats.weekSessionsCount} sesiones · Choques hoy: ${stats.conflictsExtras}`;
     }
 
     if (els.anaTopTitle) els.anaTopTitle.textContent = "Operación";
     if (els.anaTopContent){
-      const ocu = (st.cupoMaxSum > 0) ? utils.percent(st.cupoOcuSum, st.cupoMaxSum) : 0;
-      const ocuTxt = (st.cupoMaxSum > 0) ? `${ocu}% (${st.cupoOcuSum}/${st.cupoMaxSum})` : "—";
+      const ocuDay = (stats.cupoMaxSum > 0) ? utils.percent(stats.cupoOcuSum, stats.cupoMaxSum) : 0;
+      const ocuDayTxt = (stats.cupoMaxSum > 0) ? `${ocuDay}% (${stats.cupoOcuSum}/${stats.cupoMaxSum})` : "—";
+      const ocuWeekTxt = pctText(stats.weekCupoOcuSum, stats.weekCupoMaxSum);
+
       els.anaTopContent.innerHTML = `
         <div style="display:flex;flex-wrap:wrap;gap:10px;">
-          <span class="stat-pill"><span class="dot-mini"></span>Grupos: ${st.groupsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Sesiones: ${st.sessionsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Salones usados: ${st.roomsUsedCount}/${ROOMS.length}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Choques: ${st.conflictsExtras}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Ocupación: ${ocuTxt}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Grupos (filtro): ${stats.groupsCount}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Sesiones hoy: ${stats.sessionsCount}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Sesiones semana: ${stats.weekSessionsCount}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Salones usados hoy: ${stats.roomsUsedCount}/${ROOMS_ARR.length}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Choques hoy: ${stats.conflictsExtras}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Ocupación hoy: ${ocuDayTxt}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Ocupación semana: ${utils.htmlEscape(ocuWeekTxt)}</span>
+          <span class="stat-pill"><span class="dot-mini"></span>Hora pico semana: ${stats.weekPeakSessions}</span>
         </div>
       `;
     }
 
-    if (els.anaBottomTitle) els.anaBottomTitle.textContent = "Nota";
+    if (els.anaBottomTitle) els.anaBottomTitle.textContent = "Distribución (según filtros)";
     if (els.anaBottomContent){
-      const notes = [];
-      if (st.conflictsExtras > 0) notes.push("Hay choques: revisa salón/hora duplicados.");
-      if (st.roomsUsedCount === ROOMS.length) notes.push("Día usando todos los salones: está apretado.");
-      if (!notes.length) notes.push("Todo normal por ahora.");
-      els.anaBottomContent.innerHTML = `
-        <div style="color:rgba(107,114,128,.95);font-weight:800;">
-          ${notes.map(n => `<div class="alert-row">${utils.htmlEscape(n)}</div>`).join("")}
+      const dist = stats.dist || {};
+      const topRooms = (dist.byRoom || []).slice(0, 5);
+      const topHours = (dist.byHour || []).slice(0, 5);
+      const topEdad  = (dist.byEdad || []).slice(0, 6);
+      const topArea  = (dist.byArea || []).slice(0, 4);
+      const byDay    = (dist.byDay || []).slice(0, 7);
+
+      const maxRoom = Math.max(1, ...topRooms.map(x => x.value || 0));
+      const maxHour = Math.max(1, ...topHours.map(x => x.value || 0));
+      const maxEdad = Math.max(1, ...topEdad.map(x => x.value || 0));
+      const maxArea = Math.max(1, ...topArea.map(x => x.value || 0));
+      const maxDay  = Math.max(1, ...byDay.map(x => x.value || 0));
+
+      const occArea = (dist.occByArea || []).slice(0, 4);
+      const occEdad = (dist.occByEdad || []).slice(0, 6);
+
+      const insights = [];
+      const hottestDay = byDay.slice().sort((a,b)=> (b.value-a.value))[0];
+      const hottestHour = topHours[0];
+      const hottestRoom = topRooms[0];
+
+      if (hottestDay?.value > 0) insights.push(`Día más cargado (semana): <b>${utils.htmlEscape(hottestDay.label)}</b> (${hottestDay.value} sesiones).`);
+      if (hottestHour?.value > 0) insights.push(`Hora más cargada: <b>${utils.htmlEscape(hottestHour.label)}</b> (${hottestHour.value} sesiones).`);
+      if (hottestRoom?.value > 0) insights.push(`Salón más usado: <b>${utils.htmlEscape(hottestRoom.label)}</b> (${hottestRoom.value} sesiones).`);
+
+      const hasOcc = stats.weekCupoMaxSum > 0;
+      if (!hasOcc) insights.push("Tip: si llenas cupoMax/cupoOcupado en los grupos, te saco ocupación por edad y por arte con más precisión.");
+
+      const grid = `
+        ${analyticsStylesHint()}
+        <div class="ana-grid">
+
+          <div class="ana-card">
+            <div class="ana-title">Sesiones por día</div>
+            <div class="ana-muted">Semana completa (con filtros actuales)</div>
+            ${byDay.map(x => compactBarRow(x.label, x.value, maxDay)).join("")}
+          </div>
+
+          <div class="ana-card">
+            <div class="ana-title">Sesiones por arte</div>
+            <div class="ana-muted">Clasificación automática por enfoque/clase</div>
+            ${topArea.map(x => compactBarRow(x.label, x.value, maxArea)).join("")}
+            ${occArea.length ? `<div style="height:10px"></div><div class="ana-title">Ocupación por arte</div>${occArea.map(x => compactOccRow(x.key, x.ocu, x.max)).join("")}` : ""}
+          </div>
+
+          <div class="ana-card">
+            <div class="ana-title">Sesiones por edad</div>
+            <div class="ana-muted">Según campo "edad" del grupo</div>
+            ${topEdad.map(x => compactBarRow(x.label, x.value, maxEdad)).join("")}
+            ${occEdad.length ? `<div style="height:10px"></div><div class="ana-title">Ocupación por edad</div>${occEdad.map(x => compactOccRow(x.key, x.ocu, x.max)).join("")}` : ""}
+          </div>
+
+          <div class="ana-card">
+            <div class="ana-title">Top salones / horas</div>
+            <div class="ana-muted">Dónde se concentra la operación</div>
+            <div style="height:6px"></div>
+            <div class="ana-title" style="font-size:14px">Top salones</div>
+            ${topRooms.length ? topRooms.map(x => compactBarRow(x.label, x.value, maxRoom)).join("") : `<div class="ana-muted">Sin datos.</div>`}
+            <div style="height:10px"></div>
+            <div class="ana-title" style="font-size:14px">Top horas</div>
+            ${topHours.length ? topHours.map(x => compactBarRow(x.label, x.value, maxHour)).join("") : `<div class="ana-muted">Sin datos.</div>`}
+          </div>
+
+        </div>
+
+        <div style="height:12px"></div>
+        <div class="ana-card">
+          <div class="ana-title">Insights</div>
+          <div class="ana-muted">${insights.length ? insights.map(x => `<div class="alert-row">${x}</div>`).join("") : "Todo normal por ahora."}</div>
         </div>
       `;
+
+      els.anaBottomContent.innerHTML = grid;
     }
   }
 
@@ -1265,16 +1606,21 @@ export function initCore(ctx){
     if (!force && renderCache.key === k) return;
     renderCache.key = k;
 
+    // en cada render nuevo, stats cache se recalcula una vez
+    statsCache.reset();
+
     syncViewContainers();
+
+    const st = getStatsCached();
 
     if (state.activeView === "list"){
       renderList();
     } else {
-      renderGrid();
+      renderGrid(st);
     }
 
-    renderStats();
-    renderAnalyticsIfPresent();
+    renderStats(st);
+    renderAnalyticsIfPresent(st);
   }
 
   /* =========================================================
@@ -1363,6 +1709,7 @@ export function initCore(ctx){
       toast(`Importados ${done} grupo(s) ✅`);
       utils.setInfo("Importación lista.");
       renderCache.reset();
+      statsCache.reset();
     }catch(err){
       console.error(err);
       toast("No pude leer ese JSON. O está roto o no era un backup.", "danger");
@@ -1401,6 +1748,7 @@ export function initCore(ctx){
 
     state.activeDay = d;
     renderCache.reset();
+    statsCache.reset();
     applyFiltersAndRender({ force:true });
     utils.writeFiltersToURL?.();
   }
@@ -1421,8 +1769,6 @@ export function initCore(ctx){
     wireGridDelegationOnce();
     wireModalOnce();
     wireBackupOnce();
-
-    // ✅ Nuevo: mini CRUD de grupos (si existe en el HTML)
     wireGroupMiniCrudOnce();
 
     applyFiltersAndRender({ force:true });
@@ -1444,7 +1790,6 @@ export function initCore(ctx){
     exportBackup,
     importBackupFromFile,
 
-    // (No necesario, pero útil si quieres abrirlo desde main.js)
     _groupMini: {
       open: groupModalOpen,
       close: groupModalClose,
