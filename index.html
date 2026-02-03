@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es-CO">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -21,7 +21,12 @@
   <link rel="preload" href="./styles.css" as="style" />
   <link rel="stylesheet" href="./styles.css" />
 
-  <!-- Utilitarios mínimos (no “tema”, solo accesibilidad/soporte) -->
+  <!-- Preload módulos (pequeña ayuda a carga percibida) -->
+  <link rel="modulepreload" href="./main.js" />
+  <link rel="modulepreload" href="./horarios.core.js" />
+  <link rel="modulepreload" href="./firebase.js" />
+
+  <!-- Utilitarios mínimos (no tema, solo soporte) -->
   <style>
     .hidden{ display:none !important; }
     .sr-only{
@@ -46,6 +51,7 @@
       border-radius:12px;
       z-index:9999;
       box-shadow: 0 12px 30px rgba(17,24,39,.12);
+      outline: none;
     }
 
     button, .btn, .icon-btn { touch-action: manipulation; }
@@ -60,23 +66,17 @@
       box-shadow: 0 12px 30px rgba(17,24,39,.06);
     }
 
-    /* Mini layout helpers (solo para el panel de grupos, no invade tu CSS) */
-    .mini-actions{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      margin-top:10px;
-      align-items:center;
-    }
-    .mini-actions .btn{ flex: 1 1 auto; }
-    .mini-note{
-      margin-top:10px;
-      font-size:12px;
-      color: rgba(17,24,39,.62);
-      line-height:1.35;
+    /* Compat: bloque oculto para "Grupo select" + mini modal */
+    #group-compat{
+      position:absolute;
+      left:-9999px; top:auto;
+      width:1px; height:1px;
+      overflow:hidden;
+      opacity:0;
+      pointer-events:none;
     }
 
-    /* Modal simple para administrar grupos (si tu CSS ya tiene modal, esto solo ayuda a no verse feo) */
+    /* Modal lite (mini CRUD grupos) */
     .modal-lite{
       position: fixed;
       inset: 0;
@@ -165,7 +165,7 @@
 
     <div class="actions" aria-label="Acciones">
       <!-- Estado -->
-      <div id="results-info" class="results-info" aria-live="polite">—</div>
+      <div id="results-info" class="results-info" aria-live="polite" aria-atomic="true">—</div>
 
       <button id="btn-reload" class="btn small" type="button" title="Recargar datos">
         Recargar
@@ -188,7 +188,13 @@
         aria-pressed="false"
       >Pantalla completa</button>
 
-      <input id="file-import-json" class="sr-only" type="file" accept="application/json" />
+      <input
+        id="file-import-json"
+        class="sr-only"
+        type="file"
+        accept="application/json"
+        aria-label="Seleccionar archivo JSON para importar"
+      />
     </div>
   </header>
 
@@ -198,44 +204,6 @@
 
       <!-- Sidebar izquierda -->
       <aside class="rail sidebar" id="sidebar" aria-label="Panel izquierdo">
-
-        <!-- ================= GRUPO ================= -->
-        <div class="panel rail-card">
-          <div class="rail-title">
-            <strong>Grupo</strong>
-            <span>Selector</span>
-          </div>
-
-          <div class="field">
-            <label for="group-select">Selecciona un grupo</label>
-            <select id="group-select">
-              <option value="">Todos los grupos</option>
-            </select>
-
-            <!-- Acciones mínimas para grupos -->
-            <div class="mini-actions" aria-label="Acciones de grupo">
-              <button
-                id="btn-group-add"
-                class="btn small"
-                type="button"
-                title="Crear un nuevo grupo en la colección groups"
-                aria-haspopup="dialog"
-                aria-controls="group-modal"
-              >+ Grupo</button>
-
-              <button
-                id="btn-group-delete"
-                class="btn small"
-                type="button"
-                title="Eliminar el grupo actualmente seleccionado"
-              >Eliminar</button>
-            </div>
-
-            <div class="mini-note">
-              Tip: si ves grupos repetidos, normalmente son documentos duplicados en Firestore. Sí, pasa. 🙃
-            </div>
-          </div>
-        </div>
 
         <!-- ================= FILTROS ================= -->
         <div class="panel rail-card" aria-label="Filtros">
@@ -277,10 +245,6 @@
             <label for="filter-clase">Área</label>
             <select id="filter-clase">
               <option value="">Todas</option>
-              <option value="Música">Música</option>
-              <option value="Danza">Danza</option>
-              <option value="Teatro">Teatro</option>
-              <option value="Artes plásticas">Artes plásticas</option>
             </select>
           </div>
 
@@ -288,12 +252,6 @@
             <label for="filter-edad">Edad / categoría</label>
             <select id="filter-edad">
               <option value="">Todas</option>
-              <option>Musibabies</option>
-              <option>Musicalitos</option>
-              <option>Musikids</option>
-              <option>Musiteens</option>
-              <option>Musigrandes</option>
-              <option>Musiadultos</option>
             </select>
           </div>
 
@@ -337,9 +295,83 @@
             <span class="legend-item dance">Danza</span>
             <span class="legend-item theater">Teatro</span>
             <span class="legend-item arts">Artes</span>
+            <span class="legend-item stim">Estimulación</span>
             <span class="legend-item peak">Hora pico</span>
           </div>
         </div>
+
+        <!-- ================= COMPAT: GRUPOS (OCULTO) ================= -->
+        <div id="group-compat" aria-hidden="true">
+          <label for="group-select">Grupo (compat)</label>
+          <select id="group-select">
+            <option value="">Todos los grupos</option>
+          </select>
+
+          <button id="btn-group-add" type="button">+ Grupo</button>
+          <button id="btn-group-delete" type="button">Eliminar</button>
+
+          <!-- Mini modal real -->
+          <div id="group-modal" class="modal-lite" aria-hidden="true">
+            <div class="modal-lite__backdrop" data-close="group-modal" aria-hidden="true"></div>
+
+            <div class="modal-lite__card" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+              <div class="modal-lite__header">
+                <strong id="group-modal-title">Crear grupo (rápido)</strong>
+                <button id="group-modal-close" class="icon-btn" type="button" aria-label="Cerrar">✕</button>
+              </div>
+
+              <div class="modal-lite__body">
+                <div class="modal-lite__grid">
+                  <div class="field">
+                    <label for="g-enfoque">Enfoque</label>
+                    <input id="g-enfoque" placeholder="Ej: Piano, Urbano…" />
+                  </div>
+
+                  <div class="field">
+                    <label for="g-edad">Edad</label>
+                    <select id="g-edad">
+                      <option value="">—</option>
+                      <option>Musibabies</option>
+                      <option>Musicalitos</option>
+                      <option>Musikids</option>
+                      <option>Musiteens</option>
+                      <option>Musigrandes</option>
+                      <option>Musiadultos</option>
+                      <option>Todos</option>
+                    </select>
+                  </div>
+
+                  <div class="field">
+                    <label for="g-clase">Área</label>
+                    <select id="g-clase">
+                      <option value="">—</option>
+                      <option>Música</option>
+                      <option>Danza</option>
+                      <option>Teatro</option>
+                      <option>Artes plásticas</option>
+                      <option>Estimulación Artística</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="modal-lite__hint">
+                  Esto crea el grupo sin horarios (luego lo abres y le agregas sesiones).
+                </div>
+              </div>
+
+              <div class="modal-lite__footer">
+                <button id="btn-group-modal-delete" class="btn" type="button" title="Eliminar el grupo seleccionado">
+                  Eliminar seleccionado
+                </button>
+                <div style="display:flex; gap:10px;">
+                  <button id="btn-group-modal-cancel" class="btn" type="button">Cancelar</button>
+                  <button id="btn-group-modal-save" class="btn primary" type="button">Crear</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </aside>
 
       <!-- Centro -->
@@ -365,26 +397,65 @@
         <section class="panel stats-card stats-below" aria-label="Estadísticas" id="analyticsWrap">
           <div class="stats-head">
             <div class="stats-title">
-              <strong id="analyticsTitle">Estadísticas</strong>
-              <span id="analyticsSubtitle">Resumen rápido según filtros.</span>
+              <strong id="analyticsTitle">Resumen + Distribución</strong>
+              <span id="analyticsSubtitle">Separado por día (activo) y semana (según filtros).</span>
             </div>
           </div>
 
-          <div class="analytics-simple">
-            <div class="stats-box">
-              <h4 id="anaTopTitle">Resumen</h4>
-              <div id="anaTopContent" class="stats-kpis"></div>
+          <!--
+            ✅ Mantiene IDs existentes (NO rompe JS):
+              - anaTopContent
+              - anaBottomContent
+              - anaAlertsContent
+            ✅ Agrega contenedor opcional para semana (anaWeekContent) sin tocar lógica actual.
+          -->
+          <div class="analytics-simple analytics-pro" aria-label="Panel de analítica">
+
+            <!-- HOY / DÍA ACTIVO (principal) -->
+            <div class="stats-box span-2" aria-label="Resumen del día activo">
+              <div class="stats-box-head">
+                <h4 id="anaTopTitle">Hoy (día activo)</h4>
+                <small class="muted">KPIs del día seleccionado en tabs.</small>
+              </div>
+              <div id="anaTopContent" class="stats-kpis stats-kpis--big"></div>
             </div>
 
-            <div class="stats-box">
-              <h4 id="anaBottomTitle">Ocupación</h4>
+            <!-- SEMANA (nuevo contenedor) -->
+            <div class="stats-box" aria-label="Resumen semanal">
+              <div class="stats-box-head">
+                <h4 id="anaWeekTitle">Semana</h4>
+                <small class="muted">Totales y picos (con filtros actuales).</small>
+              </div>
+              <!-- Vacío por ahora: se llena cuando ajustemos horarios.core.js -->
+              <div id="anaWeekContent" class="stats-kpis">
+                <span class="kpi subtle">⏳ Pendiente: separador “Semana” (sin romper nada).</span>
+              </div>
+            </div>
+
+            <!-- ALERTAS -->
+            <div class="stats-box" aria-label="Alertas y recomendaciones">
+              <div class="stats-box-head">
+                <h4>Alertas</h4>
+                <small class="muted">Señales rápidas (choques, ocupación, pico).</small>
+              </div>
+              <div id="anaAlertsContent" class="stats-alerts" aria-live="polite" aria-atomic="true"></div>
+            </div>
+
+            <!-- DISTRIBUCIÓN / OCUPACIÓN (mantiene id anaBottomContent) -->
+            <div class="stats-box span-3" aria-label="Distribución y ocupación">
+              <div class="stats-box-head">
+                <h4 id="anaBottomTitle">Distribución (semana)</h4>
+                <small class="muted">Por día, arte, edad, salones y horas.</small>
+              </div>
               <div id="anaBottomContent" class="stats-kpis"></div>
             </div>
 
-            <div class="stats-box">
-              <h4>Alertas</h4>
-              <div id="anaAlertsContent" class="stats-alerts" aria-live="polite" aria-atomic="true"></div>
-            </div>
+          </div>
+
+          <div class="sr-only" aria-hidden="true">
+            <span id="stat-total-groups"></span>
+            <span id="stat-total-sessions"></span>
+            <span id="stat-total-rooms"></span>
           </div>
         </section>
 
@@ -398,7 +469,6 @@
   </main>
 
   <!-- ================= MODAL (editor de CLASES/BLOQUES) ================= -->
-  <!-- IMPORTANTÍSIMO: inicia oculto con .hidden para que NO aparezca de primeras -->
   <div id="modal" class="modal hidden" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <header class="modal-header">
@@ -411,6 +481,7 @@
           <div class="field">
             <label for="m-clase">Área</label>
             <select id="m-clase">
+              <option value="">—</option>
               <option>Danza</option>
               <option>Teatro</option>
               <option>Música</option>
@@ -422,12 +493,14 @@
           <div class="field">
             <label for="m-edad">Edad / categoría</label>
             <select id="m-edad">
+              <option value="">—</option>
               <option>Musibabies</option>
               <option>Musicalitos</option>
               <option>Musikids</option>
               <option>Musiteens</option>
               <option>Musigrandes</option>
               <option>Musiadultos</option>
+              <option>Todos</option>
             </select>
           </div>
 
@@ -473,70 +546,6 @@
         <div class="modal-actions">
           <button id="btn-delete" class="btn" type="button">Eliminar</button>
           <button id="btn-save" class="btn primary" type="button">Guardar</button>
-        </div>
-      </footer>
-    </div>
-  </div>
-
-  <!-- ================= MODAL (ADMIN GRUPOS: crear/eliminar) ================= -->
-  <!-- Este modal es solo UI. El JS lo amarramos después. -->
-  <div id="group-modal" class="modal-lite" aria-hidden="true">
-    <div class="modal-lite__backdrop" data-close="group-modal" aria-hidden="true"></div>
-
-    <div class="modal-lite__card" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
-      <header class="modal-lite__header">
-        <h2 id="group-modal-title" style="margin:0; font-size:16px;">Crear / Eliminar grupo</h2>
-        <button id="group-modal-close" class="icon-btn" type="button" aria-label="Cerrar" data-close="group-modal">✕</button>
-      </header>
-
-      <div class="modal-lite__body">
-        <div class="modal-lite__grid">
-          <div class="field">
-            <label for="g-enfoque">Enfoque</label>
-            <input id="g-enfoque" placeholder="Ej: Teatro, Piano, Urbano…" autocomplete="off" />
-          </div>
-
-          <div class="field">
-            <label for="g-edad">Edad / categoría</label>
-            <select id="g-edad">
-              <option value="">Selecciona…</option>
-              <option>Musibabies</option>
-              <option>Musicalitos</option>
-              <option>Musikids</option>
-              <option>Musiteens</option>
-              <option>Musigrandes</option>
-              <option>Musiadultos</option>
-            </select>
-          </div>
-
-          <div class="field" style="grid-column: 1 / -1;">
-            <label for="g-clase">Área</label>
-            <select id="g-clase">
-              <option value="">Selecciona…</option>
-              <option value="Música">Música</option>
-              <option value="Danza">Danza</option>
-              <option value="Teatro">Teatro</option>
-              <option value="Artes plásticas">Artes plásticas</option>
-              <option value="Estimulación Artística">Estimulación Artística</option>
-            </select>
-          </div>
-        </div>
-
-        <p class="modal-lite__hint">
-          Esto crea/elimina documentos en <strong>Firestore → groups</strong>.
-          Si borras un grupo usado en horarios viejos, queda el “fantasma” del ID. Mejor borrar duplicados conscientes, no por impulso. 🧠
-        </p>
-      </div>
-
-      <footer class="modal-lite__footer">
-        <button id="btn-group-modal-delete" class="btn" type="button" title="Eliminar el grupo actualmente seleccionado en el dropdown">
-          Eliminar seleccionado
-        </button>
-        <div style="display:flex; gap:10px;">
-          <button id="btn-group-modal-cancel" class="btn small" type="button" data-close="group-modal">Cancelar</button>
-          <button id="btn-group-modal-save" class="btn primary small" type="button" title="Crear grupo con los campos de arriba">
-            Guardar
-          </button>
         </div>
       </footer>
     </div>
