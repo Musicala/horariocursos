@@ -16,6 +16,7 @@
 // - ✅ Evita recomputar stats 3 veces por render: cache por key (grid/list/stats/analytics comparten st)
 // - ✅ Hidratación más defensiva (sin mutar input raro)
 // - ✅ Menos trabajo en loops grandes, mantiene resultados idénticos
+// - ✅ Activo/Inactivo: normaliza boolean + marca visual (class + dataset) sin cambiar data ni lógica
 // ------------------------------------------------------------
 
 'use strict';
@@ -116,6 +117,9 @@ export function initCore(ctx){
 
   function hydrateGroup(raw){
     const g = { ...(raw || {}) };
+
+    // Normaliza booleano de activo (por defecto true)
+    g.activo = (g.activo == null) ? true : !!g.activo;
 
     g.clase   = (g.clase ?? "").toString().trim();
     g.edad    = (g.edad ?? "").toString().trim();
@@ -1300,6 +1304,7 @@ export function initCore(ctx){
 
             block.dataset.action = "edit";
             block.dataset.id = g?.id || "";
+            block.dataset.active = g?.activo ? "1" : "0";
 
             const secondary = [g?.clase, nivel].filter(Boolean).join(" · ");
 
@@ -1332,6 +1337,10 @@ export function initCore(ctx){
 
             block.appendChild(t1);
             block.appendChild(meta);
+
+            if (!g.activo) {
+              block.classList.add("inactive");
+            }
 
             applyBlockColors(block, g);
             cell.appendChild(block);
@@ -1441,12 +1450,12 @@ export function initCore(ctx){
       const roomLabel = ROOMS_LABEL_BY_KEY.get(s.room) || s.room;
 
       return `
-        <article class="list-item" data-action="edit" data-id="${utils.htmlEscape(g.id || "")}" title="${utils.htmlEscape(title)}">
+        <article class="list-item${(!g.activo ? " inactive" : "")}" data-active="${g.activo?"1":"0"}" data-action="edit" data-id="${utils.htmlEscape(g.id || "")}" title="${utils.htmlEscape(title)}">
           <div class="li-top">
             <span class="li-time">${utils.htmlEscape(s.time)}</span>
             <span class="li-room">${utils.htmlEscape(roomLabel)}</span>
           </div>
-          <div class="li-title">${utils.htmlEscape(enfoque)}</div>
+          <div class="li-title">${utils.htmlEscape(enfoque)}${!g.activo ? ` <span class="pill ghost" style="margin-left:6px">Inactivo</span>` : ""}</div>
           <div class="li-meta">
             ${edad ? `<span class="pill">${utils.htmlEscape(edad)}</span>` : ""}
             ${clase ? `<span class="pill">${utils.htmlEscape(clase)}</span>` : ""}
