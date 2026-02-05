@@ -19,6 +19,9 @@
 // - ✅ Activo/Inactivo: normaliza boolean + marca visual (class + dataset) sin cambiar data ni lógica
 // ------------------------------------------------------------
 
+import { initStats } from "./core.stats.js";
+import { initAnalytics } from "./render.analytics.js";
+
 'use strict';
 
 export function initCore(ctx){
@@ -295,7 +298,20 @@ export function initCore(ctx){
     ].join("::");
   }
 
+  
   /* =========================================================
+     STATS + ANALYTICS (delegado)
+     - computeStats / renderStats vienen de core.stats.js
+     - renderAnalyticsIfPresent viene de render.analytics.js
+  ========================================================= */
+  const statsApi = initStats(ctx);
+  const analyticsApi = initAnalytics(ctx);
+
+  const computeStats = statsApi.computeStats;
+  const renderStats = statsApi.renderStats;
+  const renderAnalyticsIfPresent = analyticsApi.renderAnalyticsIfPresent;
+
+/* =========================================================
      STATS CACHE (evita recomputar 3 veces por render)
   ========================================================= */
   const statsCache = {
@@ -512,195 +528,6 @@ export function initCore(ctx){
       seen.add(key);
     }
     return false;
-  }
-
-  /* =========================================================
-     STATS + ANALYTICS (DAY + WEEK)
-  ========================================================= */
-  function sessionsForDay(groups, day){
-    const out = [];
-    const dayCanon = utils.canonDay(day);
-
-    for (const g0 of (groups || [])){
-      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
-      const sessions = g.__sessions || [];
-      for (const s of sessions){
-        if (s.day !== dayCanon) continue;
-        out.push({ group: g, day: dayCanon, time: s.time, room: s.room });
-      }
-    }
-
-    out.sort((a,b) => utils.safeTimeToMinutes(a.time) - utils.safeTimeToMinutes(b.time));
-    return out;
-  }
-
-  function sessionsForAllDays(groups){
-    const out = [];
-    for (const g0 of (groups || [])){
-      const g = (g0 && g0.__sessions) ? g0 : hydrateGroup(g0);
-      for (const s of (g.__sessions || [])){
-        if (!s.day || !s.time || !s.room) continue;
-        out.push({ group: g, day: s.day, time: s.time, room: s.room });
-      }
-    }
-    out.sort((a,b) => {
-      const da = DAYS.indexOf(a.day);
-      const db = DAYS.indexOf(b.day);
-      if (da !== db) return da - db;
-      const ta = utils.safeTimeToMinutes(a.time);
-      const tb = utils.safeTimeToMinutes(b.time);
-      if (ta !== tb) return ta - tb;
-      const ra = String(a.room||"");
-      const rb = String(b.room||"");
-      return ra.localeCompare(rb, "es");
-    });
-    return out;
-  }
-
-  function computeStats(groups, day){
-    const daySessions = sessionsForDay(groups, day);
-    const weekSessions = sessionsForAllDays(groups);
-
-    const roomsUsed = new Set();
-    const occCells = new Map(); // time__room -> count
-    let peakSessions = 0;
-    let cupoMaxSum = 0;
-    let cupoOcuSum = 0;
-
-    for (const it of daySessions){
-      roomsUsed.add(it.room);
-      if (PEAK_HOURS?.has?.(it.time)) peakSessions++;
-
-      const k = `${it.time}__${it.room}`;
-      occCells.set(k, (occCells.get(k) || 0) + 1);
-
-      const g = it.group;
-      const mx = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
-      const oc = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
-      if (mx > 0){
-        cupoMaxSum += mx;
-        cupoOcuSum += oc;
-      }
-    }
-
-    let collisionsCells = 0;
-    let conflictsExtras = 0;
-    for (const [, c] of occCells){
-      if (c > 1){
-        collisionsCells++;
-        conflictsExtras += (c - 1);
-      }
-    }
-
-    const byDay = new Map();
-    const byRoom = new Map();
-    const byHour = new Map();
-    const byEdad = new Map();
-    const byArea = new Map();
-    const byClase = new Map();
-
-    const occByArea = new Map();
-    const occByEdad = new Map();
-
-    let weekCupoMaxSum = 0;
-    let weekCupoOcuSum = 0;
-    let weekPeakSessions = 0;
-
-    for (const it of weekSessions){
-      const g = it.group;
-
-      const aKey = g.__tone || toneClassForGroup(g);
-      const aLbl = areaLabel(aKey);
-      const eKey = safeKey(g.__ageKey || ageKey(g), "Sin edad");
-      const cKey = safeKey(g?.clase, "Sin clase");
-
-      incMap(byDay, it.day, 1);
-      incMap(byRoom, ROOMS_LABEL_BY_KEY.get(it.room) || it.room, 1);
-      incMap(byHour, it.time, 1);
-      incMap(byEdad, eKey, 1);
-      incMap(byArea, aLbl, 1);
-      incMap(byClase, cKey, 1);
-
-      if (PEAK_HOURS?.has?.(it.time)) weekPeakSessions++;
-
-      const mx = utils.clampInt(g?.__cupoMax ?? g?.cupoMax ?? g?.cupo_max ?? 0, 0);
-      const oc = utils.clampInt(g?.__cupoOcu ?? g?.cupoOcupado ?? g?.cupo_ocupado ?? 0, 0);
-      if (mx > 0){
-        weekCupoMaxSum += mx;
-        weekCupoOcuSum += oc;
-        addOccAgg(occByArea, aLbl, oc, mx);
-        addOccAgg(occByEdad, eKey, oc, mx);
-      }
-    }
-
-    const byRoomArr = mapToSortedArray(byRoom);
-    const byHourArr = mapToSortedArray(byHour);
-    const byEdadArr = mapToSortedArray(byEdad);
-    const byAreaArr = mapToSortedArray(byArea);
-    const byClaseArr = mapToSortedArray(byClase);
-
-    const occByAreaArr = mapOccToSortedArray(occByArea);
-    const occByEdadArr = mapOccToSortedArray(occByEdad);
-
-    const dayOrderArr = DAYS.map(d => ({ key:d, label:d, value: byDay.get(d) || 0 }));
-
-    return {
-      groupsCount: (groups || []).length,
-      sessionsCount: daySessions.length,
-      roomsUsedCount: roomsUsed.size,
-      peakSessions,
-      collisionsCells,
-      conflictsExtras,
-      cupoMaxSum,
-      cupoOcuSum,
-      daySessions,
-
-      weekSessionsCount: weekSessions.length,
-      weekPeakSessions,
-      weekCupoMaxSum,
-      weekCupoOcuSum,
-
-      dist: {
-        byDay: dayOrderArr,
-        byRoom: byRoomArr,
-        byHour: byHourArr,
-        byEdad: byEdadArr,
-        byArea: byAreaArr,
-        byClase: byClaseArr,
-        occByArea: occByAreaArr,
-        occByEdad: occByEdadArr,
-      }
-    };
-  }
-
-  function renderStats(st){
-    const stats = st || getStatsCached();
-
-    safeElSetText(els.statTotalGroups,   String(stats.groupsCount));
-    safeElSetText(els.statTotalSessions, String(stats.sessionsCount));
-    safeElSetText(els.statTotalRooms,    String(stats.roomsUsedCount));
-
-    if (els.analyticsSubtitle){
-      els.analyticsSubtitle.textContent =
-        `Día: ${state.activeDay} · Sesiones: ${stats.sessionsCount} · Choques: ${stats.conflictsExtras}`;
-    }
-
-    if (els.anaAlertsContent){
-      const notes = [];
-      if (stats.conflictsExtras > 0) notes.push(`Hay ${stats.conflictsExtras} choque(s) extra (mismo salón y hora).`);
-      if (stats.peakSessions >= 10) notes.push("Hora pico está bien cargada (ojo choques).");
-      if (stats.cupoMaxSum > 0){
-        const ocu = stats.cupoOcuSum / Math.max(1, stats.cupoMaxSum);
-        if (ocu >= 0.92) notes.push("Ocupación muy alta: si entra demanda, se te estalla el cupo.");
-        if (ocu <= 0.25 && stats.sessionsCount >= 8) notes.push("Ocupación baja: revisa mezcla de grupos o estrategia.");
-      }
-
-      els.anaAlertsContent.innerHTML = notes.length
-        ? `<div style="display:flex;flex-direction:column;gap:8px;">
-             ${notes.slice(0,6).map(n => `<div class="alert-row">${utils.htmlEscape(n)}</div>`).join("")}
-           </div>`
-        : `<div style="font-weight:800;color:rgba(107,114,128,.95);">Sin alertas por ahora.</div>`;
-    }
   }
 
   /* =========================================================
@@ -1480,311 +1307,183 @@ export function initCore(ctx){
     }
   }
 
-  /* =========================================================
-     ANALYTICS WRAP (si existe en HTML)
-  ========================================================= */
-  function renderAnalyticsIfPresent(st){
-    if (!els.analyticsWrap) return;
-
-    const stats = st || getStatsCached();
-
-    if (els.analyticsTitle) els.analyticsTitle.textContent = "Resumen + Distribución";
-    if (els.analyticsSubtitle) {
-      els.analyticsSubtitle.textContent =
-        `Día: ${state.activeDay} · Hoy: ${stats.sessionsCount} sesiones · Semana (filtros): ${stats.weekSessionsCount} sesiones · Choques hoy: ${stats.conflictsExtras}`;
-    }
-
-    if (els.anaTopTitle) els.anaTopTitle.textContent = "Operación";
-    if (els.anaTopContent){
-      const ocuDay = (stats.cupoMaxSum > 0) ? utils.percent(stats.cupoOcuSum, stats.cupoMaxSum) : 0;
-      const ocuDayTxt = (stats.cupoMaxSum > 0) ? `${ocuDay}% (${stats.cupoOcuSum}/${stats.cupoMaxSum})` : "—";
-      const ocuWeekTxt = pctText(stats.weekCupoOcuSum, stats.weekCupoMaxSum);
-
-      els.anaTopContent.innerHTML = `
-        <div style="display:flex;flex-wrap:wrap;gap:10px;">
-          <span class="stat-pill"><span class="dot-mini"></span>Grupos (filtro): ${stats.groupsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Sesiones hoy: ${stats.sessionsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Sesiones semana: ${stats.weekSessionsCount}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Salones usados hoy: ${stats.roomsUsedCount}/${ROOMS_ARR.length}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Choques hoy: ${stats.conflictsExtras}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Ocupación hoy: ${ocuDayTxt}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Ocupación semana: ${utils.htmlEscape(ocuWeekTxt)}</span>
-          <span class="stat-pill"><span class="dot-mini"></span>Hora pico semana: ${stats.weekPeakSessions}</span>
-        </div>
-      `;
-    }
-
-    if (els.anaBottomTitle) els.anaBottomTitle.textContent = "Distribución (según filtros)";
-    if (els.anaBottomContent){
-      const dist = stats.dist || {};
-      const topRooms = (dist.byRoom || []).slice(0, 5);
-      const topHours = (dist.byHour || []).slice(0, 5);
-      const topEdad  = (dist.byEdad || []).slice(0, 6);
-      const topArea  = (dist.byArea || []).slice(0, 4);
-      const byDay    = (dist.byDay || []).slice(0, 7);
-
-      const maxRoom = Math.max(1, ...topRooms.map(x => x.value || 0));
-      const maxHour = Math.max(1, ...topHours.map(x => x.value || 0));
-      const maxEdad = Math.max(1, ...topEdad.map(x => x.value || 0));
-      const maxArea = Math.max(1, ...topArea.map(x => x.value || 0));
-      const maxDay  = Math.max(1, ...byDay.map(x => x.value || 0));
-
-      const occArea = (dist.occByArea || []).slice(0, 4);
-      const occEdad = (dist.occByEdad || []).slice(0, 6);
-
-      const insights = [];
-      const hottestDay = byDay.slice().sort((a,b)=> (b.value-a.value))[0];
-      const hottestHour = topHours[0];
-      const hottestRoom = topRooms[0];
-
-      if (hottestDay?.value > 0) insights.push(`Día más cargado (semana): <b>${utils.htmlEscape(hottestDay.label)}</b> (${hottestDay.value} sesiones).`);
-      if (hottestHour?.value > 0) insights.push(`Hora más cargada: <b>${utils.htmlEscape(hottestHour.label)}</b> (${hottestHour.value} sesiones).`);
-      if (hottestRoom?.value > 0) insights.push(`Salón más usado: <b>${utils.htmlEscape(hottestRoom.label)}</b> (${hottestRoom.value} sesiones).`);
-
-      const hasOcc = stats.weekCupoMaxSum > 0;
-      if (!hasOcc) insights.push("Tip: si llenas cupoMax/cupoOcupado en los grupos, te saco ocupación por edad y por arte con más precisión.");
-
-      const grid = `
-        ${analyticsStylesHint()}
-        <div class="ana-grid">
-
-          <div class="ana-card">
-            <div class="ana-title">Sesiones por día</div>
-            <div class="ana-muted">Semana completa (con filtros actuales)</div>
-            ${byDay.map(x => compactBarRow(x.label, x.value, maxDay)).join("")}
-          </div>
-
-          <div class="ana-card">
-            <div class="ana-title">Sesiones por arte</div>
-            <div class="ana-muted">Clasificación automática por enfoque/clase</div>
-            ${topArea.map(x => compactBarRow(x.label, x.value, maxArea)).join("")}
-            ${occArea.length ? `<div style="height:10px"></div><div class="ana-title">Ocupación por arte</div>${occArea.map(x => compactOccRow(x.key, x.ocu, x.max)).join("")}` : ""}
-          </div>
-
-          <div class="ana-card">
-            <div class="ana-title">Sesiones por edad</div>
-            <div class="ana-muted">Según campo "edad" del grupo</div>
-            ${topEdad.map(x => compactBarRow(x.label, x.value, maxEdad)).join("")}
-            ${occEdad.length ? `<div style="height:10px"></div><div class="ana-title">Ocupación por edad</div>${occEdad.map(x => compactOccRow(x.key, x.ocu, x.max)).join("")}` : ""}
-          </div>
-
-          <div class="ana-card">
-            <div class="ana-title">Top salones / horas</div>
-            <div class="ana-muted">Dónde se concentra la operación</div>
-            <div style="height:6px"></div>
-            <div class="ana-title" style="font-size:14px">Top salones</div>
-            ${topRooms.length ? topRooms.map(x => compactBarRow(x.label, x.value, maxRoom)).join("") : `<div class="ana-muted">Sin datos.</div>`}
-            <div style="height:10px"></div>
-            <div class="ana-title" style="font-size:14px">Top horas</div>
-            ${topHours.length ? topHours.map(x => compactBarRow(x.label, x.value, maxHour)).join("") : `<div class="ana-muted">Sin datos.</div>`}
-          </div>
-
-        </div>
-
-        <div style="height:12px"></div>
-        <div class="ana-card">
-          <div class="ana-title">Insights</div>
-          <div class="ana-muted">${insights.length ? insights.map(x => `<div class="alert-row">${x}</div>`).join("") : "Todo normal por ahora."}</div>
-        </div>
-      `;
-
-      els.anaBottomContent.innerHTML = grid;
-    }
-  }
 
   /* =========================================================
-     APPLY FILTERS + RENDER (central)
+     API COMPAT (main.js)
+     - syncDayUI(day): fija día y re-render
+     - showOnly(view): compat para UI (core igual re-renderiza)
+     - applyFiltersAndRender({force})
+     - exportBackup(): descarga JSON (grupos + metadata)
+     - importBackupFromFile(ev): lee JSON y upsert en Firestore
   ========================================================= */
-  function syncViewContainers(){
-    if (!els.grid || !els.list) return;
 
-    const isList = (state.activeView === "list");
-    els.list.classList.toggle("hidden", !isList);
-    els.grid.classList.toggle("hidden", isList);
+  function syncDayUI(day){
+    const canon = utils.canonDay(day);
+    if (canon !== state.activeDay){
+      state.activeDay = canon;
+      renderCache.reset();
+      statsCache.reset();
+    } else {
+      state.activeDay = canon;
+    }
+    try{ utils.writeFiltersToURL?.(); }catch(_){}
+    applyFiltersAndRender({ force:true });
   }
 
   function showOnly(view){
+    // main.js ya maneja la UI (hidden). Esto es solo compat.
     state.activeView = (view === "list") ? "list" : "grid";
-    syncViewContainers();
   }
 
   function applyFiltersAndRender({ force=false } = {}){
+    const key = computeKey();
+
+    if (!force && renderCache.key === key){
+      // Nada cambió. Igual aseguramos que los handlers estén cableados.
+      wireModalOnce();
+      wireGroupMiniCrudOnce();
+      wireGridDelegationOnce();
+      return;
+    }
+
+    // Cache key
+    renderCache.key = key;
+    // Invalida stats cache para este key
+    statsCache.key = "";
+    statsCache.st = null;
+
+    // 1) Filtrar
     applyFilters();
 
-    const k = computeKey();
-    if (!force && renderCache.key === k) return;
-    renderCache.key = k;
-
-    // en cada render nuevo, stats cache se recalcula una vez
-    statsCache.reset();
-
-    syncViewContainers();
-
+    // 2) Stats (una sola vez)
     const st = getStatsCached();
 
+    // 3) Render vista
     if (state.activeView === "list"){
       renderList();
+      utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${st.sessionsCount} sesión(es)`);
     } else {
       renderGrid(st);
     }
 
-    renderStats(st);
-    renderAnalyticsIfPresent(st);
-  }
+    // 4) Stats widgets + analytics (si existen en HTML)
+    try{ renderStats(st); }catch(err){ console.error("[stats]", err); }
+    try{ renderAnalyticsIfPresent(st); }catch(err){ console.error("[analytics]", err); }
 
-  /* =========================================================
-     EXPORT / IMPORT JSON (backup/restore)
-  ========================================================= */
-  function downloadJSON(filename, obj){
-    const blob = new Blob([JSON.stringify(obj, null, 2)], { type:"application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    // 5) Ensure wiring
+    wireModalOnce();
+    wireGroupMiniCrudOnce();
+    wireGridDelegationOnce();
   }
 
   function exportBackup(){
     const payload = {
-      kind: "musicala.horarios.backup",
-      version: CORE_VERSION,
-      exportedAt: new Date().toISOString(),
+      meta: {
+        app: "Horarios Grupales · Musicala",
+        version: CORE_VERSION,
+        exportedAt: new Date().toISOString(),
+        groupsCollection: ctx.GROUPS_COLLECTION,
+      },
       groups: (state.allGroups || []).map(g => {
-        const out = { ...g };
+        // export "limpio": sin campos internos
+        const out = { ...(g || {}) };
         delete out.__sessions;
         delete out.__tone;
         delete out.__ageKey;
-        delete out.__search;
         delete out.__cupoMax;
         delete out.__cupoOcu;
         return out;
-      }),
+      })
     };
 
-    downloadJSON(`horarios_backup_${new Date().toISOString().slice(0,10)}.json`, payload);
-    toast("Backup descargado ✅");
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `horarios-backup-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 6000);
   }
 
-  async function upsertGroupById(id, data){
-    const clean = { ...(data || {}) };
-
-    delete clean.__sessions;
-    delete clean.__tone;
-    delete clean.__ageKey;
-    delete clean.__search;
-    delete clean.__cupoMax;
-    delete clean.__cupoOcu;
-
-    const docRef = ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, id);
-    await ctx.fs.setDoc(docRef, clean, { merge:true });
-  }
-
-  async function importBackupFromFile(eOrFile){
-    if (!perms.canEdit()){
-      perms.explainNoPerm("importar");
+  async function importBackupFromFile(ev){
+    const file = ev?.target?.files?.[0];
+    if (!file){
+      toast("No se seleccionó archivo.", "warn");
       return;
     }
 
-    const file = eOrFile?.target?.files?.[0] || eOrFile;
-    if (!file) return;
-
+    let text = "";
     try{
-      const txt = await file.text();
-      const json = JSON.parse(txt);
-
-      const groups = Array.isArray(json?.groups) ? json.groups : null;
-
-      if (!groups){
-        toast("Ese JSON no tiene .groups (backup inválido).", "warn");
-        return;
-      }
-
-      const ok = confirm(`Se van a importar ${groups.length} grupo(s) (upsert por ID). ¿Continuar?`);
-      if (!ok) return;
-
-      utils.setInfo("Importando…");
-
-      let done = 0;
-      for (const g of groups){
-        const id = (g?.id ?? "").toString().trim();
-        if (!id) continue;
-        await upsertGroupById(id, g);
-        done++;
-      }
-
-      toast(`Importados ${done} grupo(s) ✅`);
-      utils.setInfo("Importación lista.");
-      renderCache.reset();
-      statsCache.reset();
+      text = await file.text();
     }catch(err){
       console.error(err);
-      toast("No pude leer ese JSON. O está roto o no era un backup.", "danger");
-      utils.setInfo("Error importando.");
-    }finally{
-      if (eOrFile?.target && eOrFile.target.value != null){
-        eOrFile.target.value = "";
+      toast("No pude leer el archivo.", "danger");
+      return;
+    }
+
+    let data = null;
+    try{
+      data = JSON.parse(text);
+    }catch(err){
+      console.error(err);
+      toast("JSON inválido.", "danger");
+      return;
+    }
+
+    const groups = Array.isArray(data?.groups) ? data.groups : (Array.isArray(data) ? data : []);
+    if (!groups.length){
+      toast("El backup no trae grupos.", "warn");
+      return;
+    }
+
+    // Upsert masivo (setDoc mantiene ID si viene; si no, crea)
+    let ok = 0;
+    let fail = 0;
+
+    for (const raw of groups){
+      try{
+        const g = hydrateGroup(raw);
+        // payload firestore (sin internos)
+        const payload = {
+          clase: g.clase || "",
+          edad: g.edad || "",
+          enfoque: g.enfoque || "",
+          nivel: g.nivel || "",
+          cupoMax: utils.clampInt(g?.cupoMax ?? g?.cupo_max ?? g?.__cupoMax ?? 0, 0),
+          cupoOcupado: utils.clampInt(g?.cupoOcupado ?? g?.cupo_ocupado ?? g?.__cupoOcu ?? 0, 0),
+          activo: !!g.activo,
+          sessions: (g.__sessions || []).map(s => ({ day:s.day, time:s.time, room:s.room })),
+          updatedAt: ctx.fs.serverTimestamp?.() ?? null,
+        };
+
+        if (g.id){
+          await ctx.fs.setDoc(ctx.fs.doc(ctx.db, ctx.GROUPS_COLLECTION, g.id), payload, { merge:true });
+        } else {
+          await ctx.fs.addDoc(ctx.fs.collection(ctx.db, ctx.GROUPS_COLLECTION), {
+            ...payload,
+            createdAt: ctx.fs.serverTimestamp?.() ?? null,
+          });
+        }
+
+        ok++;
+      }catch(err){
+        console.error("[import]", err);
+        fail++;
       }
     }
+
+    toast(`Importación lista: ${ok} ok${fail ? ` · ${fail} fallaron` : ""}`, fail ? "warn" : "success");
+
+    // limpiar input para permitir re-importar el mismo archivo
+    try{ ev.target.value = ""; }catch(_){}
+
+    // recargar desde Firestore
+    reload({ force:true });
   }
-
-  function wireBackupOnce(){
-    if (els.btnExport && !els.btnExport.__wired){
-      els.btnExport.__wired = true;
-      els.btnExport.addEventListener("click", exportBackup);
-    }
-
-    if (els.btnImport && !els.btnImport.__wired){
-      els.btnImport.__wired = true;
-      els.btnImport.addEventListener("click", () => els.fileImport?.click?.());
-    }
-
-    if (els.fileImport && !els.fileImport.__wired){
-      els.fileImport.__wired = true;
-      els.fileImport.addEventListener("change", importBackupFromFile);
-    }
-  }
-
-  /* =========================================================
-     UI WIRING (compat)
-  ========================================================= */
-  function syncDayUI(newDay){
-    const d = utils.canonDay(newDay);
-    if (!DAYS.includes(d)) return;
-    if (state.activeDay === d) return;
-
-    state.activeDay = d;
-    renderCache.reset();
-    statsCache.reset();
-    applyFiltersAndRender({ force:true });
-    utils.writeFiltersToURL?.();
-  }
-
-  /* =========================================================
-     INIT
-  ========================================================= */
-  function init(){
-    const d = utils.canonDay(state.activeDay || DAYS[0]);
-    state.activeDay = DAYS.includes(d) ? d : DAYS[0];
-
-    state.activeView = (state.activeView === "list") ? "list" : "grid";
-
-    document.body.classList.toggle("color-mode-area", state.colorMode !== "age");
-    document.body.classList.toggle("color-mode-age",  state.colorMode === "age");
-    document.body.classList.toggle("helpers-off", !state.helpersOn);
-
-    wireGridDelegationOnce();
-    wireModalOnce();
-    wireBackupOnce();
-    wireGroupMiniCrudOnce();
-
-    applyFiltersAndRender({ force:true });
-    subscribeGroupsOnce();
-  }
-
-  init();
 
   /* =========================================================
      PUBLIC API (for main.js)
