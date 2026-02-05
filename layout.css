@@ -1,0 +1,403 @@
+/* =============================================================================
+  layout.css — Horarios Grupales · Musicala (LIGHT) — PRO++++ (Center Fix)
+  ---------------------------------------------------------------------------
+  Qué vive aquí:
+  ✅ Contenedores principales + estructura general
+  ✅ Topbar / rail / layout de columnas
+  ✅ Sidebar rail (cards + headers) ✅
+  ✅ Centro (.center) + compat (.main) ✅ FIX CLAVE
+  ✅ Responsive (mobile/tablet)
+  ✅ Fullscreen (modo UI + fullscreen nativo)
+  ✅ Ajustes de altura “smart” y print
+  ✅ Fixes reales de flex/min-height para evitar “aire fantasma”
+
+  Qué NO vive aquí:
+  ✖ Botones/chips/inputs (components.css)
+  ✖ Grid/list/blocks específicos (views.css)
+  ✖ Modal/toast/analytics (components.css / views.css)
+============================================================================= */
+
+/* =========================
+   CONTAINERS
+========================= */
+.container{
+  max-width:none;
+  margin:0;
+  padding: 0 calc(14px + var(--safe-right)) 0 calc(14px + var(--safe-left));
+}
+
+/* Shell envuelve SOLO el main (en tu HTML). No es header. */
+.shell{
+  max-width:none;
+  margin:0;
+  padding:
+    calc(10px + var(--safe-top))
+    calc(14px + var(--safe-right))
+    calc(22px + var(--safe-bottom))
+    calc(14px + var(--safe-left));
+  min-height: 0;
+}
+
+/* Panel base */
+.panel{
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r20, 18px);
+  box-shadow: var(--shadowSoft, 0 12px 45px rgba(17,24,39,.10));
+}
+.panel.soft{ background: var(--panel2); }
+
+/* =========================
+   TOPBAR (tu HTML actual)
+========================= */
+.topbar{
+  position: sticky;
+  top: 0;
+  z-index: var(--z-topbar, 50);
+
+  background: linear-gradient(180deg, rgba(255,255,255,.90), rgba(255,255,255,.78));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 12px;
+
+  min-height: var(--topbar-h, 70px);
+
+  /* Topbar está fuera del .container en tu HTML, así que sí necesita padding */
+  padding:
+    10px calc(14px + var(--safe-right))
+    10px calc(14px + var(--safe-left));
+}
+
+/* Compat: si algún día metes .topbar__inner */
+.topbar__inner{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: var(--topbar-h, 70px);
+  padding: 10px 0;
+}
+
+/* Brand (tu HTML usa .brand + .logo + .brand-text) */
+.brand{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  min-width: 0;
+}
+.brand .logo,
+.brand__logo{
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  display:block;
+}
+.brand-text,
+.brand__txt{
+  display:flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.brand-text h1,
+.brand__title{
+  margin:0;
+  font-weight: 950;
+  letter-spacing: -.02em;
+  line-height: 1.05;
+  font-size: 18px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brand-text p,
+.brand__sub{
+  margin: 2px 0 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Actions (tu HTML usa .actions que vive en components.css, aquí solo layout) */
+.topbar .actions{
+  display:flex;
+  align-items:center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.dividerV{
+  width:1px;
+  height: 28px;
+  background: var(--line);
+  border-radius: 999px;
+  opacity: .9;
+}
+
+/* =========================
+   LAYOUT (workspace)
+   ✅ FIX: el centro era .center y no tenía reglas
+========================= */
+.workspace,
+.app{
+  display:flex;
+  gap: 14px;
+
+  /* importantísimo para que ambos lados estiren */
+  align-items: stretch;
+
+  margin-top: 14px;
+
+  /* para que flex items no inventen alturas */
+  min-height: 0;
+}
+
+/* Sidebar / rail */
+.rail{
+  position: sticky;
+  top: calc(var(--topbar-h, 70px) + 12px);
+  align-self: stretch;
+
+  width: 280px;
+  flex: 0 0 280px;
+
+  display:flex;
+  flex-direction: column;
+  gap: 12px;
+
+  min-height: 0;
+}
+
+/* Centro: tu HTML usa .center (no .main) */
+.center,
+.main{
+  flex: 1 1 auto;
+  min-width: 0;
+
+  display:flex;
+  flex-direction: column;
+  gap: 12px;
+
+  /* 🔥 esto evita el “aire” y el tablero pegado abajo */
+  min-height: 0;
+}
+
+/* =========================
+   RAIL CARDS + HEADERS
+========================= */
+.rail-card{ padding: 14px; }
+
+.rail-title{
+  display:flex;
+  align-items: baseline;
+  gap: 6px;            /* evita VistaModo pegado */
+  margin: 0 0 10px 0;
+  min-width: 0;
+}
+.rail-title strong{
+  font-weight: 1000;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.1;
+}
+.rail-title span{
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--muted);
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+/* =========================
+   STRUCTURE helpers
+========================= */
+.box{ padding: 14px; }
+
+.boxHeader{
+  display:flex;
+  align-items:flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.boxTitle{
+  margin:0;
+  font-weight: 900;
+  letter-spacing: -.02em;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.boxHint{
+  margin: 2px 0 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.row{
+  display:flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.row.tight{ gap: 8px; }
+
+.stack{
+  display:flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* =========================
+   Tablero wrapper (estructura)
+   Nota: la vista (scroll/grid) vive en views.css
+========================= */
+/* tu HTML usa .schedule-wrap (kebab) */
+.schedule-wrap,
+.scheduleWrap{
+  display:flex;
+  flex-direction: column;
+  gap: 12px;
+
+  /* 🔥 clave: el tablero debe “comerse” el alto disponible */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Scroll region también debe poder crecer */
+.schedule-scroll,
+.scheduleScroll{
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Mini footer (si lo usas) */
+.miniFooter{
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 2px 0 2px;
+}
+
+/* =========================
+   RESPONSIVE
+========================= */
+@media (max-width: 980px){
+  .workspace,
+  .app{
+    flex-direction: column;
+  }
+
+  .rail{
+    position: relative;
+    top: auto;
+    width: 100%;
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 640px){
+  .topbar{
+    align-items:flex-start;
+    gap: 10px;
+  }
+  .topbar .actions{
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .dividerV{ display:none; }
+
+  .brand-text h1,
+  .brand__title{ font-size: 16px; }
+
+  .brand-text p,
+  .brand__sub{ font-size: 11.5px; }
+
+  .rail-card{ padding: 12px; }
+}
+
+/* =========================
+   FULLSCREEN (UI)
+========================= */
+.is-fullscreen{ overflow: hidden; }
+
+.is-fullscreen .shell{ padding: 0; }
+
+.is-fullscreen .workspace,
+.is-fullscreen .app{
+  margin-top: 0;
+  height: calc(100svh - var(--topbar-h, 70px));
+  min-height: 0;
+}
+
+.is-fullscreen .rail{
+  position: relative;
+  top: auto;
+  width: 320px;
+  flex: 0 0 320px;
+
+  height: calc(100svh - var(--topbar-h, 70px));
+  overflow: auto;
+  padding: 12px;
+}
+
+.is-fullscreen .center,
+.is-fullscreen .main{
+  height: calc(100svh - var(--topbar-h, 70px));
+  overflow: auto;
+  padding: 12px;
+  min-height: 0;
+}
+
+/* =========================
+   PRINT
+========================= */
+@media print{
+  .topbar{ position: static; border: none; box-shadow: none; }
+  .rail{ display:none !important; }
+  .workspace, .app{ display:block; }
+  .panel{ box-shadow:none !important; }
+  .shell{ padding: 0 !important; }
+}
+
+/* =========================
+   SMART HEIGHT (modo normal)
+========================= */
+@media (min-width: 981px){
+  .rail{
+    max-height: calc(100svh - var(--topbar-h, 70px) - 18px);
+    overflow: auto;
+    padding-bottom: 10px;
+  }
+
+  /* Ojo: NO pongas max-height a .center, solo min-height:0, porque ahí nacen los “aires” */
+  .center,
+  .main{
+    min-height: 0;
+  }
+}
+
+/* =========================
+   EXTRA: prefers-contrast
+========================= */
+@media (prefers-contrast: more){
+  .topbar{ border-bottom-color: rgba(16,24,40,.22); }
+  .panel{ border-color: rgba(16,24,40,.20); }
+}
