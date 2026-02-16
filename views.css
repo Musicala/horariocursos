@@ -1,5 +1,5 @@
 /* =============================================================================
-  views.css — Horarios Grupales · Musicala (LIGHT) — PRO+++++ (MEJORADO)
+  views.css — Horarios Grupales · Musicala (LIGHT) — PRO+++++ (FULL + MEJORADO)
   -----------------------------------------------------------------------------
   Qué vive aquí:
   ✅ Schedule grid (one-board): .sg, celdas, sticky headers, bloques
@@ -7,31 +7,56 @@
   ✅ Analytics PRO: #analyticsWrap + .ana-*
   ✅ Fullscreen-board (modo tablero) + fullscreen nativo en #grid-wrap
   ✅ Estados visuales: conflicto, peak, inactive
-  ✅ Ajustes de legibilidad (modo normal vs pantallas medianas)
+  ✅ Legibilidad y perf (sin cambiar behavior)
 ============================================================================= */
 
 /* =========================
+   BASE TOKENS (solo vista)
+   (toma vars de styles/layout si existen)
+========================= */
+:root{
+  --sg-border: var(--line-3, rgba(17,24,39,.075));
+  --sg-border-strong: rgba(17,24,39,.10);
+  --sg-bg: rgba(255,255,255,.94);
+  --sg-bg-soft: rgba(255,255,255,.72);
+  --sg-hover: var(--hover-wash, rgba(12,65,196,.050));
+  --sg-shadow: var(--shadow-2, 0 12px 45px rgba(17,24,39,.12));
+  --sg-ease: var(--ease, cubic-bezier(.2,.8,.2,1));
+  --sg-t: var(--t-fast, 120ms);
+
+  --sg-z-sticky: var(--z-sticky, 60);
+  --sg-sticky-bg: var(--sticky-bg, rgba(255,255,255,.92));
+  --sg-sticky-blur: var(--sticky-blur, blur(10px));
+
+  --sg-row-h: var(--row-h, 58px);
+  --sg-time-col: var(--time-col, 56px);
+  --sg-room-min: var(--room-min, 64px);
+  --sg-room-max: var(--room-max, 140px);
+
+  --sg-slot-pad: var(--slot-pad, 6px);
+  --sg-slot-gap: var(--slot-gap, 8px);
+
+  --sg-focus: var(--focus-ring, 0 0 0 4px rgba(12,65,196,.18));
+}
+
+/* =========================
    SCHEDULE WRAP (vista)
-   Nota: layout.css define .scheduleWrap (estructura).
-   Aquí definimos “la vista” como tal.
+   Nota: layout.css define estructura; aquí solo “look”.
 ========================= */
 .schedule-wrap,
 .scheduleWrap{
   background: var(--panel);
   border: 1px solid rgba(17,24,39,.085);
   border-radius: var(--r-xl, 22px);
-  box-shadow: var(--shadow-2, 0 12px 45px rgba(17,24,39,.12));
+  box-shadow: var(--sg-shadow);
   overflow: hidden;
 
   display:flex;
   flex-direction:column;
 
-  /* 🔥 Fix: que flex calcule alturas bien y no invente espacios */
   min-height: 0;
   flex: 1 1 auto;
 
-  /* contain con sticky + blur a veces hace cosas raras.
-     Dejamos layout/paint, pero evitamos style acá. */
   contain: layout paint;
 }
 
@@ -41,17 +66,15 @@
   overflow:auto;
   -webkit-overflow-scrolling: touch;
 
-  /* 🔥 Mejor comportamiento en trackpad / wheel */
   overscroll-behavior: contain;
   scrollbar-gutter: stable both-edges;
 
   position: relative;
-  background: rgba(255,255,255,.72);
+  background: var(--sg-bg-soft);
 
   flex: 1 1 auto;
   min-height: 0;
 
-  /* contain sólo paint para no romper sticky con algunos browsers */
   contain: paint;
 }
 
@@ -87,71 +110,73 @@
   isolation: isolate;
   display: grid;
 
-  grid-auto-rows: var(--row-h, 58px);
+  grid-auto-rows: var(--sg-row-h);
 
   width: 100%;
   min-width: 100%;
   max-width: 100%;
 
-  /* MODO NORMAL: anti “balloon effect” (cap por salón) */
+  /* MODO NORMAL: cap por salón */
   grid-template-columns:
-    var(--time-col, 56px)
-    repeat(var(--rooms, 10), minmax(var(--room-min, 64px), var(--room-max, 140px))) !important;
+    var(--sg-time-col)
+    repeat(var(--rooms, 10), minmax(var(--sg-room-min), var(--sg-room-max))) !important;
 
   align-content: start;
 
-  /* sticky + contain: mejor que sea paint nomás */
   contain: paint;
 }
 
 /* Cells */
 .sg-cell{
-  border-right: 1px solid var(--line-3, rgba(17,24,39,.075));
-  border-bottom: 1px solid var(--line-3, rgba(17,24,39,.075));
+  border-right: 1px solid var(--sg-border);
+  border-bottom: 1px solid var(--sg-border);
   padding: 5px 6px;
-  background: rgba(255,255,255,.94);
+  background: var(--sg-bg);
   font-size: var(--fs-12, 12px);
   min-width: 0;
 
   background-image: linear-gradient(180deg, rgba(15,23,42,.016), transparent 55%);
-  transition: background var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1));
+  transition: background var(--sg-t) var(--sg-ease);
 }
 .sg-cell:hover{
   background:
     linear-gradient(180deg, rgba(15,23,42,.012), transparent 55%),
-    var(--hover-wash, rgba(12,65,196,.050));
+    var(--sg-hover);
 }
 
 /* Sticky headers */
 .sg-sticky-top{
   position: sticky;
   top: 0;
-  z-index: calc(var(--z-sticky, 60) - 10);
-  background: var(--sticky-bg, rgba(255,255,255,.92));
-  backdrop-filter: var(--sticky-blur, blur(10px));
+  z-index: calc(var(--sg-z-sticky) - 10);
+  background: var(--sg-sticky-bg);
+  backdrop-filter: var(--sg-sticky-blur);
+  -webkit-backdrop-filter: var(--sg-sticky-blur);
   box-shadow: 0 8px 20px rgba(17,24,39,.07);
-  border-bottom: 1px solid rgba(17,24,39,.10);
+  border-bottom: 1px solid var(--sg-border-strong);
   will-change: transform;
-
-  /* evita subpixel “parpadeo” */
   transform: translateZ(0);
 }
 .sg-sticky-left{
   position: sticky;
   left: 0;
-  z-index: calc(var(--z-sticky, 60) - 0);
+  z-index: calc(var(--sg-z-sticky) - 0);
   background: rgba(255,255,255,.96);
-  backdrop-filter: var(--sticky-blur, blur(10px));
+  backdrop-filter: var(--sg-sticky-blur);
+  -webkit-backdrop-filter: var(--sg-sticky-blur);
   box-shadow: 10px 0 22px rgba(17,24,39,.07);
-  border-right: 1px solid rgba(17,24,39,.10);
+  border-right: 1px solid var(--sg-border-strong);
   will-change: transform;
   transform: translateZ(0);
 }
-.sg-sticky-top.sg-sticky-left{ z-index: var(--z-sticky, 60); }
-.sg-room{ z-index: calc(var(--z-sticky, 60) - 5); }
-.sg-time{ z-index: calc(var(--z-sticky, 60) - 2); }
+.sg-sticky-top.sg-sticky-left{ z-index: var(--sg-z-sticky); }
+.sg-room{ z-index: calc(var(--sg-z-sticky) - 5); }
+.sg-time{ z-index: calc(var(--sg-z-sticky) - 2); }
 
-.sg-corner{ font-weight: 1000; letter-spacing: .02em; }
+.sg-corner{
+  font-weight: 1000;
+  letter-spacing: .02em;
+}
 
 .sg-room .room-title{
   font-weight: 1050;
@@ -191,8 +216,8 @@
   flex-direction: column;
   align-items: stretch;
 
-  gap: var(--slot-gap, 8px);
-  padding: var(--slot-pad, 6px);
+  gap: var(--sg-slot-gap);
+  padding: var(--sg-slot-pad);
 
   min-height: 100%;
   min-width: 0;
@@ -208,9 +233,9 @@
     radial-gradient(800px 90px at 50% 0%, rgba(12,65,196,.055), transparent 60%);
   opacity: .56;
   transition:
-    opacity var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    transform var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    background var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1));
+    opacity var(--sg-t) var(--sg-ease),
+    transform var(--sg-t) var(--sg-ease),
+    background var(--sg-t) var(--sg-ease);
 }
 .sg-cell-slot:hover .sg-empty{
   opacity: .74;
@@ -250,9 +275,9 @@
 
   text-align:left;
   transition:
-    transform var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    box-shadow var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    border-color var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1));
+    transform var(--sg-t) var(--sg-ease),
+    box-shadow var(--sg-t) var(--sg-ease),
+    border-color var(--sg-t) var(--sg-ease);
 
   min-width: 0;
   overflow: hidden;
@@ -262,7 +287,8 @@
   contain: paint;
 }
 .sg-block:focus-visible{
-  box-shadow: var(--focus-ring, 0 0 0 4px rgba(12,65,196,.18)),
+  outline: none;
+  box-shadow: var(--sg-focus),
               0 10px 22px rgba(17,24,39,.08),
               0 1px 0 rgba(255,255,255,.75) inset;
 }
@@ -345,23 +371,24 @@
   z-index: 1;
 }
 
-/* Area colors */
-.sg-block.music{ border-left-color: var(--mozart); }
-.sg-block.dance{ border-left-color: var(--brahms); }
-.sg-block.theater{ border-left-color: var(--bach); }
+/* Area colors (fallbacks si no existen vars) */
+.sg-block.music{ border-left-color: var(--mozart, #0C41C4); }
+.sg-block.dance{ border-left-color: var(--brahms, #CE0071); }
+.sg-block.theater{ border-left-color: var(--bach, #680DBF); }
 .sg-block.arts{ border-left-color: var(--arts-accent, rgba(245,158,11,.95)); }
 .sg-block.stim{ border-left-color: var(--stim-accent, #10B981); }
 
-/* color-mode-age */
-body.color-mode-age .sg-block[data-age="Musibabies"]{ border-left-color: var(--mozart); }
-body.color-mode-age .sg-block[data-age="Musicalitos"]{ border-left-color: var(--vivaldi); }
-body.color-mode-age .sg-block[data-age="Musikids"]{ border-left-color: var(--beethoven); }
-body.color-mode-age .sg-block[data-age="Musiteens"]{ border-left-color: var(--brahms); }
-body.color-mode-age .sg-block[data-age="Musigrandes"]{ border-left-color: var(--bach); }
+/* color-mode-age (mantén tus mapeos) */
+body.color-mode-age .sg-block[data-age="Musibabies"]{ border-left-color: var(--mozart, #0C41C4); }
+body.color-mode-age .sg-block[data-age="Musicalitos"]{ border-left-color: var(--vivaldi, #5729FF); }
+body.color-mode-age .sg-block[data-age="Musikids"]{ border-left-color: var(--beethoven, #680DBF); }
+body.color-mode-age .sg-block[data-age="Musiteens"]{ border-left-color: var(--brahms, #CE0071); }
+body.color-mode-age .sg-block[data-age="Musigrandes"]{ border-left-color: var(--bach, #220A63); }
 body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(17,24,39,.85); }
 
 /* ===============================
    DIFERENCIADOR: ACTIVO vs INACTIVO
+   (sin cambiar lógica, solo look)
 =============================== */
 .block.inactive,
 .sg-block.inactive,
@@ -418,9 +445,9 @@ body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(1
   flex-direction:column;
   gap: 6px;
   transition:
-    transform var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    box-shadow var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1)),
-    border-color var(--t-fast, 120ms) var(--ease, cubic-bezier(.2,.8,.2,1));
+    transform var(--sg-t) var(--sg-ease),
+    box-shadow var(--sg-t) var(--sg-ease),
+    border-color var(--sg-t) var(--sg-ease);
 }
 .schedule-list .sl-item:hover,
 .schedule-list .list-item:hover,
@@ -457,7 +484,7 @@ body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(1
 .list-item .li-time{
   font-size: var(--fs-15, 15px);
   font-weight: 1000;
-  color: var(--mozart);
+  color: var(--mozart, #0C41C4);
 }
 .list-item .li-room{
   font-size: var(--fs-12, 12px);
@@ -491,12 +518,11 @@ body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(1
 }
 
 /* =========================
-   ANALYTICS (PRO) — anclado y menos “flotante”
+   ANALYTICS (PRO)
 ========================= */
 #analyticsWrap{
   border-radius: var(--r-xl, 22px);
 
-  /* mantiene tu grad institucional pero más sutil */
   background:
     var(--stats-grad,
       radial-gradient(900px 170px at 10% 0%, rgba(12,65,196,.10), transparent 60%),
@@ -508,7 +534,6 @@ body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(1
   box-shadow: 0 14px 34px rgba(17,24,39,.07);
   overflow: hidden;
 
-  /* 🔥 hace que se sienta “pegado” al flujo, no como modal */
   margin-top: 2px;
 }
 
@@ -747,7 +772,6 @@ body.color-mode-age .sg-block[data-age="Musiadultos"]{ border-left-color: rgba(1
 
 /* =========================
    FIX REAL (MODO NORMAL)
-   Más altura solo cuando hace falta, sin volverlo “gigante”
 ========================= */
 @media (max-width: 1400px){
   body:not(.fullscreen-board) .sg{ grid-auto-rows: 70px !important; }
@@ -910,9 +934,27 @@ body.fullscreen-board .modal-footer{
 }
 
 /* =========================
+   ACCESIBILIDAD / MOTION
+========================= */
+@media (prefers-reduced-motion: reduce){
+  .sg-cell,
+  .sg-empty,
+  .sg-block,
+  .schedule-list .sl-item,
+  .schedule-list .list-item,
+  .scheduleList .sl-item,
+  .scheduleList .list-item{
+    transition: none !important;
+  }
+  .sg-block:hover{ transform: none !important; }
+}
+
+/* =========================
    PRINT (solo vista)
 ========================= */
 @media print{
   .schedule-scroll, .scheduleScroll{ max-height:none; overflow:visible; background:#fff; }
-  .sg-sticky-top, .sg-sticky-left{ position: static; box-shadow:none; backdrop-filter:none; }
+  .sg-sticky-top, .sg-sticky-left{ position: static; box-shadow:none; backdrop-filter:none; -webkit-backdrop-filter:none; }
+  .sg{ grid-auto-rows: 58px !important; }
+  .sg-block{ box-shadow:none; }
 }
