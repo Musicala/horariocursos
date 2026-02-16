@@ -17,6 +17,7 @@
 // - ✅ Hidratación más defensiva (sin mutar input raro)
 // - ✅ Menos trabajo en loops grandes, mantiene resultados idénticos
 // - ✅ Activo/Inactivo: normaliza boolean + marca visual (class + dataset) sin cambiar data ni lógica
+// - ✅ COLORES: mejor diferenciación Musicala-friendly + más contraste de fondo en blocks
 // ------------------------------------------------------------
 
 import { initStats } from "./core.stats.js";
@@ -33,21 +34,35 @@ export function initCore(ctx){
   /* =========================================================
      CONSTANTS / HELPERS
   ========================================================= */
+
+  // ---------------------------------------------------------
+  // 🎨 COLORES (MEJORADOS)
+  // Objetivo: diferenciación REAL en tableros densos, sin romper "Musicala vibe".
+  // - Area: Música, Danza, Teatro, Artes.
+  // - Edad: categorías con tonos separados (incluye cálidos) para lectura rápida.
+  // ---------------------------------------------------------
   const AREA_COLORS = Object.freeze({
-    music:  "#0C41C4",
-    dance:  "#CE0071",
-    theater:"#680DBF",
-    arts:   "#220A63",
+    music:  "#0C41C4", // Azul Mozart (queda)
+    dance:  "#CE0071", // Magenta Brahms (queda)
+    theater:"#7C3AED", // Violeta más brillante (se separa del azul)
+    arts:   "#F59E0B", // Ámbar artístico (rompe monotonía fría y mejora lectura)
   });
 
   const AGE_COLORS = Object.freeze({
-    Musibabies:   "#0C41C4",
-    Musicalitos:  "#5729FF",
-    Musikids:     "#680DBF",
-    Musiteens:    "#CE0071",
-    Musigrandes:  "#220A63",
-    Musiadultos:  "#0C0A1E",
-    Todos: "#10B981",
+    Musibabies:   "#10B981", // verde suave (muy distinguible)
+    Musicalitos:  "#F97316", // naranja vivo
+    Musikids:     "#0C41C4", // azul Mozart
+    Musiteens:    "#CE0071", // magenta
+    Musigrandes:  "#7C3AED", // violeta brillante
+    Musiadultos:  "#111827", // gris oscuro elegante (no “azul oscuro casi igual”)
+    Todos:        "#10B981",
+  });
+
+  // Ajustes de contraste visual del bloque (sin tocar behavior)
+  const BLOCK_THEME = Object.freeze({
+    borderAlpha: 0.26, // antes 0.22
+    bgAlpha: 0.18,     // antes 0.12 (mejor legibilidad)
+    bgWhite: 0.94,     // mantiene look premium light
   });
 
   const AGE_COLOR_INDEX = (() => {
@@ -150,18 +165,19 @@ export function initCore(ctx){
     const tone = g.__tone || toneClassForGroup(g);
     const age  = g.__ageKey || ageKey(g);
 
-    const areaHex = AREA_COLORS[tone] || "#0C41C4";
+    const areaHex = AREA_COLORS[tone] || AREA_COLORS.music || "#0C41C4";
     const ageHexResolved = resolveAgeHex(age);
-    const ageHex  = ageHexResolved || "#0C41C4";
+    const ageHex  = ageHexResolved || AREA_COLORS.music || "#0C41C4";
 
     blockEl.dataset.tone = tone;
     if (age) blockEl.dataset.age = age;
 
     const hex = (state.colorMode === "area") ? areaHex : ageHex;
 
+    // Más “separación” visual sin cambiar el sistema:
     blockEl.style.borderLeftColor = hex;
-    blockEl.style.borderColor = hexToRGBA(hex, 0.22);
-    blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, 0.12)}, rgba(255,255,255,0.94))`;
+    blockEl.style.borderColor = hexToRGBA(hex, BLOCK_THEME.borderAlpha);
+    blockEl.style.background  = `linear-gradient(180deg, ${hexToRGBA(hex, BLOCK_THEME.bgAlpha)}, rgba(255,255,255,${BLOCK_THEME.bgWhite}))`;
   }
 
   function safeElSetText(el, txt){
@@ -298,7 +314,6 @@ export function initCore(ctx){
     ].join("::");
   }
 
-  
   /* =========================================================
      STATS + ANALYTICS (delegado)
      - computeStats / renderStats vienen de core.stats.js
@@ -311,7 +326,7 @@ export function initCore(ctx){
   const renderStats = statsApi.renderStats;
   const renderAnalyticsIfPresent = analyticsApi.renderAnalyticsIfPresent;
 
-/* =========================================================
+  /* =========================================================
      STATS CACHE (evita recomputar 3 veces por render)
   ========================================================= */
   const statsCache = {
@@ -1307,16 +1322,9 @@ export function initCore(ctx){
     }
   }
 
-
   /* =========================================================
      API COMPAT (main.js)
-     - syncDayUI(day): fija día y re-render
-     - showOnly(view): compat para UI (core igual re-renderiza)
-     - applyFiltersAndRender({force})
-     - exportBackup(): descarga JSON (grupos + metadata)
-     - importBackupFromFile(ev): lee JSON y upsert en Firestore
   ========================================================= */
-
   function syncDayUI(day){
     const canon = utils.canonDay(day);
     if (canon !== state.activeDay){
@@ -1331,7 +1339,6 @@ export function initCore(ctx){
   }
 
   function showOnly(view){
-    // main.js ya maneja la UI (hidden). Esto es solo compat.
     state.activeView = (view === "list") ? "list" : "grid";
   }
 
@@ -1339,26 +1346,20 @@ export function initCore(ctx){
     const key = computeKey();
 
     if (!force && renderCache.key === key){
-      // Nada cambió. Igual aseguramos que los handlers estén cableados.
       wireModalOnce();
       wireGroupMiniCrudOnce();
       wireGridDelegationOnce();
       return;
     }
 
-    // Cache key
     renderCache.key = key;
-    // Invalida stats cache para este key
     statsCache.key = "";
     statsCache.st = null;
 
-    // 1) Filtrar
     applyFilters();
 
-    // 2) Stats (una sola vez)
     const st = getStatsCached();
 
-    // 3) Render vista
     if (state.activeView === "list"){
       renderList();
       utils.setInfo(`${state.filteredGroups.length} grupo(s) · ${state.activeDay} · ${st.sessionsCount} sesión(es)`);
@@ -1366,11 +1367,9 @@ export function initCore(ctx){
       renderGrid(st);
     }
 
-    // 4) Stats widgets + analytics (si existen en HTML)
     try{ renderStats(st); }catch(err){ console.error("[stats]", err); }
     try{ renderAnalyticsIfPresent(st); }catch(err){ console.error("[analytics]", err); }
 
-    // 5) Ensure wiring
     wireModalOnce();
     wireGroupMiniCrudOnce();
     wireGridDelegationOnce();
@@ -1385,7 +1384,6 @@ export function initCore(ctx){
         groupsCollection: ctx.GROUPS_COLLECTION,
       },
       groups: (state.allGroups || []).map(g => {
-        // export "limpio": sin campos internos
         const out = { ...(g || {}) };
         delete out.__sessions;
         delete out.__tone;
@@ -1440,14 +1438,12 @@ export function initCore(ctx){
       return;
     }
 
-    // Upsert masivo (setDoc mantiene ID si viene; si no, crea)
     let ok = 0;
     let fail = 0;
 
     for (const raw of groups){
       try{
         const g = hydrateGroup(raw);
-        // payload firestore (sin internos)
         const payload = {
           clase: g.clase || "",
           edad: g.edad || "",
@@ -1478,10 +1474,8 @@ export function initCore(ctx){
 
     toast(`Importación lista: ${ok} ok${fail ? ` · ${fail} fallaron` : ""}`, fail ? "warn" : "success");
 
-    // limpiar input para permitir re-importar el mismo archivo
     try{ ev.target.value = ""; }catch(_){}
 
-    // recargar desde Firestore
     reload({ force:true });
   }
 
